@@ -295,6 +295,42 @@ describe("external endpoint CLI behavior", () => {
     }
   }, 30_000);
 
+  it("preserves a connector repair when named reprovisioning falls back to quick", async () => {
+    stateDirs.push(isolateStateDir());
+    const env = fakeCloudflaredEnv();
+    const root = makeTmpDir("named-fallback-repair");
+    tempDirs.push(root);
+    write(root, "hello.txt", "hello\n");
+
+    try {
+      const first = await runCli(
+        ["tunnel", "choose", "--mode", "named", "--zone", "example.com", "--hostname", "c2c-a.example.com", "--workspace", root, "--json"],
+        env
+      );
+      expect(first.code).toBe(0);
+      const workspace = new Workspace(root);
+      writeLastEndpoint({
+        workspaceId: workspace.id,
+        port: 48765,
+        publicUrl: "https://c2c-a.example.com",
+        mcpUrl: "https://c2c-a.example.com/mcp",
+      });
+
+      const fallback = await runCli(
+        ["tunnel", "choose", "--mode", "named", "--zone", "example.com", "--hostname", "invalid hostname", "--workspace", root, "--json"],
+        env
+      );
+      expect(fallback.code).toBe(0);
+      expect(json<{ state: { preference: string; pendingConnectorAction: string; pendingPreviousMcpUrl: string } }>(fallback).state).toMatchObject({
+        preference: "quick",
+        pendingConnectorAction: "update",
+        pendingPreviousMcpUrl: "https://c2c-a.example.com/mcp",
+      });
+    } finally {
+      await stop(root, env);
+    }
+  }, 30_000);
+
   it.each([
     ["quick", "external"],
     ["external", "quick"],

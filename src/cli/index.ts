@@ -1418,7 +1418,8 @@ tunnelCmd
         hostname: opts.hostname,
       });
       const namedMcpUrl = result.state.hostname ? mcpUrlFromPublic(`https://${result.state.hostname}`) : null;
-      const state = preservePendingRepair(result.state, pendingProviderSwitch(previous, "named", namedMcpUrl));
+      const selectedProvider = result.state.preference === "named" ? "named" : "quick";
+      const state = preservePendingRepair(result.state, pendingProviderSwitch(previous, selectedProvider, namedMcpUrl));
       if (readRuntimeState(workspace.id)) await stopBridge(root);
       const payload = {
         ...tunnelChoicePayload(workspace),
