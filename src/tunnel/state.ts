@@ -1,13 +1,17 @@
+import fs from "node:fs";
 import path from "node:path";
+import { randomBytes } from "node:crypto";
 import { getStateDir, readJsonIfExists, writeSecureJson } from "../config/paths.js";
 
-export type TunnelPreference = "unset" | "quick" | "named";
+export type TunnelPreference = "unset" | "quick" | "named" | "external";
 
 export interface TunnelState {
   workspaceId: string;
   preference: TunnelPreference;
   askedAt?: string;
   provider?: "cloudflare-quick" | "cloudflare-named";
+  externalUrl?: string;
+  endpointId?: string;
   tunnelName?: string;
   tunnelId?: string;
   hostname?: string;
@@ -51,11 +55,54 @@ export function namedTunnelBinding(state: TunnelState): { tunnelName: string; ho
   return { tunnelName: state.tunnelName, hostname: state.hostname };
 }
 
+export function externalEndpointBinding(state: TunnelState): { url: string; endpointId: string } | null {
+  if (state.preference !== "external") return null;
+  const url = state.externalUrl?.trim();
+  const endpointId = state.endpointId?.trim();
+  return url && endpointId ? { url, endpointId } : null;
+}
+
+export function chooseExternalEndpoint(
+  workspaceId: string,
+  externalUrl: string,
+  endpointId = `c2c_ep_${randomBytes(18).toString("base64url")}`
+): TunnelState {
+  return writeTunnelState({
+    workspaceId,
+    preference: "external",
+    askedAt: new Date().toISOString(),
+    externalUrl,
+    endpointId,
+    configuredAt: new Date().toISOString(),
+  });
+}
+
+export function duplicateExternalEndpointIds(workspaceId: string, externalUrl: string): string[] {
+  const dir = path.dirname(tunnelStateFile(workspaceId));
+  try {
+    return fs
+      .readdirSync(dir)
+      .filter((file) => file.endsWith(".json"))
+      .map((file) => readJsonIfExists<TunnelState>(path.join(dir, file)))
+      .filter(
+        (state): state is TunnelState =>
+          state !== null &&
+          state.workspaceId !== workspaceId &&
+          state.preference === "external" &&
+          state.externalUrl === externalUrl
+      )
+      .map((state) => state.workspaceId);
+  } catch {
+    return [];
+  }
+}
+
 export const TUNNEL_CHOICE_PROMPT = `连 ChatGPT 之前，有一条可选的。
 你有没有 Cloudflare 账号，并且有没有一个域名已经加在 Cloudflare 里？
 - 有：可以用固定域名。插件配一次，以后电脑重启一般不用再改插件。要登录一次 Cloudflare，并在你的域名下加一个子域名。
 - 没有：用临时地址。不用注册，功能一样。但电脑重启后地址常会变，ChatGPT 里的旧地址会失效。我会自己删掉这个项目的插件、用新地址再加回去，你偶尔要再登一下 ChatGPT。能修好，只是更慢。
-没有账号也完全能用。你选哪个？如果有域名，直接告诉我域名（例如 example.com）。`;
+如果你已经有一个固定的公开 HTTPS 地址，也可以直接告诉我地址，例如 https://c2c.example.com。
+没有账号也完全能用。你选哪个？`;
 
 export const NAMED_LOGIN_PROMPT =
   "会弹出浏览器，请登录 Cloudflare 并选中你的域名，完成后告诉我「好了」。";

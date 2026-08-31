@@ -10,15 +10,22 @@ import { createMcpServer } from "../mcp/server.js";
 import { createMcpHttpHandler } from "../mcp/http.js";
 import { CloudflaredQuickTunnel } from "../tunnel/cloudflared.js";
 import { CloudflaredNamedTunnel } from "../tunnel/cloudflared-named.js";
+import { ExternalEndpointProvider } from "../tunnel/external.js";
 import type { TunnelProvider } from "../tunnel/provider.js";
-import { namedTunnelBinding, readTunnelState } from "../tunnel/state.js";
+import { externalEndpointBinding, namedTunnelBinding, readTunnelState } from "../tunnel/state.js";
 import { Logger, nullLogger } from "../logger/index.js";
 import { DEFAULT_HOST, DEFAULT_PORT } from "../config/paths.js";
 import { SERVICE_NAME, VERSION } from "../version.js";
 import { writeRuntimeState, clearRuntimeState, type RuntimeState } from "./runtime.js";
 
 function tunnelForWorkspace(workspaceId: string, logger: Logger): TunnelProvider {
-  const binding = namedTunnelBinding(readTunnelState(workspaceId));
+  const state = readTunnelState(workspaceId);
+  const external = externalEndpointBinding(state);
+  if (state.preference === "external") {
+    if (!external) throw new Error("External endpoint configuration is incomplete or invalid");
+    return new ExternalEndpointProvider({ ...external, logger });
+  }
+  const binding = namedTunnelBinding(state);
   if (binding) {
     return new CloudflaredNamedTunnel({
       tunnelName: binding.tunnelName,
@@ -91,8 +98,9 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   const pairing = new PairingManager(workspace.id, { ttlMs: opts.pairingTtlMs });
   const tunnel = opts.tunnelProvider ?? tunnelForWorkspace(workspace.id, logger);
   const adminToken = `c2c_admin_${randomBytes(24).toString("base64url")}`;
+  const instanceId = `c2c_i_${randomBytes(18).toString("base64url")}`;
 
-  let publicBaseUrl: string | null = null;
+  let publicBaseUrl: string | null = tunnel.getPublicUrl();
 
   const app = express();
   app.set("trust proxy", true);
@@ -108,7 +116,13 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   // ---- Health (public but minimal) ---------------------------------------
 
   app.get("/health", (_req, res) => {
-    res.json({ service: SERVICE_NAME, version: VERSION, workspaceId: workspace.id, status: "ok" });
+    res.json({
+      service: SERVICE_NAME,
+      version: VERSION,
+      status: "ok",
+      instanceId,
+      ...(tunnel.healthIdentity ? { endpointId: tunnel.healthIdentity } : {}),
+    });
   });
 
   // ---- OAuth + discovery ---------------------------------------------------
@@ -175,6 +189,13 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   });
 
   app.post("/admin/tunnel/start", adminGuard, (_req, res) => {
+    if (!tunnel.managed) {
+      res.status(409).json({
+        error: "external_endpoint_managed",
+        message: "The external endpoint is managed outside C2C.",
+      });
+      return;
+    }
     tunnel
       .start(port)
       .then((url) => {
@@ -189,6 +210,13 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   });
 
   app.post("/admin/tunnel/stop", adminGuard, (_req, res) => {
+    if (!tunnel.managed) {
+      res.status(409).json({
+        error: "external_endpoint_managed",
+        message: "The external endpoint is managed outside C2C.",
+      });
+      return;
+    }
     void tunnel.stop().then(() => {
       publicBaseUrl = null;
       persistRuntime();
@@ -222,6 +250,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
       workspaceId: workspace.id,
       workspaceRoot: workspace.root,
       pid: process.pid,
+      instanceId,
       port,
       adminToken,
       publicUrl: publicBaseUrl,

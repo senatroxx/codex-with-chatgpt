@@ -25,7 +25,7 @@
 | Symlink escape | Canonicalization resolves symlinks before the containment check (file and directory symlinks both covered by tests) |
 | Sensitive files | Deny-by-default patterns (.env*, keys, SSH, cloud creds, keychains…) enforced at resolve time — reads, listings, and search all pass through the same gate; `git diff` adds pathspec excludes; `.env.example` allowed |
 | Oversized file / diff DoS | read_file caps lines and bytes per response; git_diff paginates by byte offset with hard caps; search caps matches and file sizes |
-| Tunnel exposure | Bridge binds 127.0.0.1 only (refuses 0.0.0.0); the only public surface is HTTPS via the tunnel, protected by OAuth; `/health` reveals only a salted workspace hash |
+| Public connection exposure | Bridge binds 127.0.0.1 only (refuses 0.0.0.0); managed Cloudflare tunnels forward to loopback, while external origins require a user-controlled private-host relay; `/mcp` remains protected by OAuth and `/health` reveals only service/version plus opaque instance/endpoint identities |
 | Admin API abuse | Loopback-only + random admin token (0600 runtime file) + requests with proxy headers (`cf-connecting-ip`, `x-forwarded-for`) rejected; unauthenticated probes get 404 |
 | Log credential leakage | Logger redacts token prefixes, bearer headers, token-like parameters, and pairing-code-shaped strings before writing |
 | Prompt injection via repo | Tool descriptions state content is untrusted data; the bridge grants no additional authority regardless of content; ChatGPT has zero write/exec capability |
@@ -41,7 +41,8 @@ Access tokens: 1 hour. Refresh tokens: 30 days, rotated. All tokens bound to
 
 State lives under the OS-convention app dir
 (`~/Library/Application Support/codex-with-chatgpt` on macOS), directories 0700,
-files 0600. Named-hostname preference and tunnel metadata live there too
+files 0600. Named-hostname preference, managed tunnel metadata, and external
+origins plus their opaque endpoint identity live there too
 (`tunnels/<workspaceId>.json`) — never in the project. Only SHA-256 hashes of
 tokens are persisted — a stolen state file does not yield usable bearer tokens.
 

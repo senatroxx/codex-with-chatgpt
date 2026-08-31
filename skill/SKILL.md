@@ -70,7 +70,8 @@ whatever data it needs by itself.
    - `report.bridge.ok` is not true
    - `report.mcp.ok` is not true (unauthenticated local `/mcp` must be 401)
    - sandbox / state-dir write failed (EPERM)
-   - this workspace used to have a public URL and the tunnel is down
+   - this workspace used to have a public URL and a managed tunnel is down
+   - external endpoint configuration is invalid, or the endpoint routes to a different C2C instance
    - `chatgptRepair.needed` is true (fix the connector first, then doctor again)
    - `namedRepair.needed` is true (user must login to Cloudflare, then doctor again.
      Do not Delete the ChatGPT connector — the address did not change)
@@ -191,7 +192,7 @@ Inside the checkout directory (see Locations):
 ## Connection choice (once per workspace)
 
 Ask this **before** the public address exists (`c2c setup` / first `doctor --fix`
-that starts a tunnel). Do not mention tunnels, wrangler, DNS, or hostnames.
+that starts a managed connection). Do not mention tunnels, wrangler, DNS, or hostnames.
 Speak only of 临时地址 / 固定域名 / 登录 Cloudflare.
 
 1. `c2c tunnel status -w <workspace> --json`
@@ -207,21 +208,28 @@ Speak only of 临时地址 / 固定域名 / 登录 Cloudflare.
      domain. If the command returns `need: "zone"`, ask once and retry.
      If `fallback` is true: tell them `userMessage` and continue on the
      temporary address. Do not retry named unless they ask.
+   - 已经有固定的公开 HTTPS 地址（例如 `https://c2c.example.com`）→
+     `c2c endpoint configure -w <ws> --url <url> --json`。不需要登录 Cloudflare。
 4. Never put connection credentials in the project. The CLI stores them in
    the C2C state directory.
 
 ## Workflow: first-time setup（"使用 Codex with ChatGPT 完成首次配置"）
 
-1. Detect prerequisites yourself: `node --version` (>= 20), and check `cloudflared`.
-   - If cloudflared is missing on macOS run `brew install cloudflared`; on Windows use
-     `winget install Cloudflare.cloudflared`. Do this yourself; don't ask.
+1. Detect prerequisites yourself: `node --version` (>= 20). Check/install
+   `cloudflared` only when the user chooses a C2C-managed Cloudflare connection.
+   - If that mode is selected and cloudflared is missing on macOS run
+     `brew install cloudflared`; on Windows use `winget install Cloudflare.cloudflared`.
+     Do this yourself; don't ask.
 2. If the c2c repo has no `node_modules`, run `pnpm install && pnpm build` in it.
 3. Run `c2c sandbox-allow --json`, then **Connection choice**, then
    `c2c setup -w <workspace> --json`.
    `sandbox-allow` edits Codex `config.toml` only — it adds C2C's state directory
    to `[sandbox_workspace_write].writable_roots` so later chats can write logs
    without elevation. If the write is denied, request approval and retry once.
-   → returns `{ mcpUrl, pairingCode, workspaceName, connectorName, ... }`.
+   → returns `{ mcpUrl, pairingCode, workspaceName, connectorName, endpoint, ... }`.
+   For an external endpoint, `endpoint.managed` is false and the URL is stable;
+   do not install or start cloudflared. The external reverse proxy and
+   host-local relay must already be configured outside C2C.
    `connectorName` is this workspace's plugin title (legacy installs stay
    `Codex with ChatGPT`; additional workspaces get `Codex with ChatGPT · <name>`).
    Pairing codes expire in ~5 minutes: run `c2c pair --json` for a fresh one if you're slow.
@@ -530,8 +538,10 @@ Please independently inspect the workspace and current git diff through MCP.
 ## Workflow: reconnect after address reclaim（全关掉以后地址失效）
 
 This is the normal case when the user quit Codex / the terminal / the machine:
-the previous public address is gone. Doctor already started a new one.
+the previous temporary public address is gone. Doctor already started a new one.
 `connectorAction: "update"` means Delete + create again — not Reconnect.
+This workflow applies to temporary Cloudflare addresses only. Named Cloudflare
+and external endpoints keep their URL across bridge restarts.
 
 `c2c doctor --json` will look like:
 `{ "chatgptRepair": { "needed": true, "connectorAction": "update", "connectorName": "...", "userMessage": "...", "mcpUrl": "...", "pairingCode": "...", "pages": { ... } } }`
@@ -580,7 +590,11 @@ the previous public address is gone. Doctor already started a new one.
    `c2c tunnel login --json`, then doctor again. Do not Delete the connector.
 3. If `chatgptRepair.needed`, follow **reconnect after address reclaim**, then
    doctor again.
-4. Otherwise apply the recovery map. Only involve the user for login / 2FA /
+4. If `externalEndpoint.reachability` is `unreachable` or `unverified`, treat it
+   as a warning. Do not install Cloudflare, replace the connector, or bypass the
+   doctor gate for a wrong-instance result; ask the user to check the external
+   reverse proxy and host-local relay.
+5. Otherwise apply the recovery map. Only involve the user for login / 2FA /
    CAPTCHA — one action.
 
 ## Recovery map
@@ -589,11 +603,12 @@ the previous public address is gone. Doctor already started a new one.
 | --- | --- |
 | Bridge not running | `c2c start` (doctor does this automatically) |
 | Tunnel dead / URL unreachable / 全关掉后连接失效 | `c2c doctor` → if `namedRepair.needed`, login to Cloudflare and doctor again (do not Delete). If `chatgptRepair.needed`, tell the user the message, then **Delete** THIS workspace's connector only (`connectorName`) and create it again. Never Reconnect. |
+| External endpoint warning / unavailable | `c2c doctor` reports configuration and reachability separately. Do not install Cloudflare or replace the connector; check the external reverse proxy and host-local relay. |
 | ChatGPT says tool call failed / 401 | token expired or revoked → re-pair (new pairing code + authorize) |
 | Pairing code rejected/expired | `c2c pair --json` for a fresh code |
 | Same explicit ChatGPT setup/reconnect browser configuration step fails twice after repair | Stop automating ChatGPT settings and use **Guided manual ChatGPT setup fallback**. Do not count browser/js timeout, loading/generating, or login/2FA waiting as failures. |
 | Port conflict | handled automatically; never surface to the user |
 | Every new chat “repairs” / cannot write the log or settings directory | `c2c sandbox-allow --json` (once). Do not ask the user. |
-| cloudflared missing | install it yourself (brew/winget), then retry |
+| cloudflared missing (managed Cloudflare mode) | install it yourself (brew/winget), then retry; external mode must not install it |
 | Sidebar has no「项目」 | Ask the user to hover「聊天」, click the …, choose「按项目整理」 |
 | Collection page is the wrong Project | Ask the user to open the named collection and say「已找到」, or accept long-chat |

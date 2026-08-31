@@ -16,6 +16,7 @@ export interface RuntimeState {
   pid: number;
   port: number;
   adminToken: string;
+  instanceId?: string;
   publicUrl: string | null;
   startedAt: string;
 }
@@ -43,8 +44,11 @@ export function clearRuntimeState(workspaceId: string): void {
 export interface HealthPayload {
   service: string;
   version: string;
-  workspaceId: string;
   status: string;
+  instanceId?: string;
+  endpointId?: string;
+  /** Present only for health responses from older bridge versions. */
+  workspaceId?: string;
 }
 
 /** Probe a port and check whether a healthy c2c bridge for the workspace answers. */
@@ -70,7 +74,8 @@ export async function findLiveBridge(workspaceId: string): Promise<RuntimeState 
   const state = readRuntimeState(workspaceId);
   if (!state) return null;
   const health = await probeBridge(state.port);
-  if (health && health.workspaceId === workspaceId) return state;
+  if (health && state.instanceId && health.instanceId === state.instanceId) return state;
+  if (health && !state.instanceId && health.workspaceId === workspaceId) return state;
   return null;
 }
 

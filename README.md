@@ -11,12 +11,13 @@
 
 **中文** — ChatGPT 付费订阅的网页版额度大量闲置，Codex 却在消耗紧张的
 API 额度做规划和 Review。本项目把"思考"交给你已付费的网页版 ChatGPT，
-Codex 只负责执行。不用 API Key、不搞逆向代理——官方网页 + 只读 MCP 桥接。
+Codex 只负责执行。不用 API Key，默认也不用自己搭建入口——官方网页 + 只读
+MCP 桥接；已有固定入口时也可以直接接入。
 
 **EN** — ChatGPT Plus/Pro web quota sits idle while your coding agent burns
 scarce API/Codex tokens on planning and review. This project moves the
 thinking to the subscription you already pay for; Codex only executes.
-No API keys, no reverse proxy — official web UI plus a read-only MCP bridge.
+No API keys — official web UI plus a read-only MCP bridge.
 
 ## What it is · 这是什么
 
@@ -42,7 +43,8 @@ Detailed docs below are in English · 详细中文文档见 **[README.zh-CN.md](
 所有事情你自己做：
 
 1. 环境自检：需要 git 和 Node.js ≥ 20，缺什么就自动安装
-  （macOS 用 Homebrew，Windows 用 winget），同时安装 cloudflared。
+  （macOS 用 Homebrew，Windows 用 winget）。如果不用自己的固定 HTTPS 地址，
+  再安装 cloudflared。
 2. 下载：把 https://github.com/XiaoDuoYa/codex-with-chatgpt 克隆到
    ~/codex-with-chatgpt（已存在就 git pull 更新）。
 3. 构建：在该目录里执行 corepack pnpm install 和 corepack pnpm build。
@@ -67,8 +69,8 @@ Please install and configure "Codex with ChatGPT" for me, fully automatically.
 I am a non-technical user — do everything yourself:
 
 1. Check the environment: git and Node.js >= 20 must be available. Install
-   anything missing yourself (macOS: Homebrew, Windows: winget). Also install
-   cloudflared.
+   anything missing yourself (macOS: Homebrew, Windows: winget). Install
+   cloudflared only if you are not using your own fixed HTTPS endpoint.
 2. Download: clone https://github.com/XiaoDuoYa/codex-with-chatgpt into
    ~/codex-with-chatgpt (if it already exists, git pull to update).
 3. Build: inside that folder run `corepack pnpm install` then `corepack pnpm build`.
@@ -118,8 +120,9 @@ Codex with ChatGPT
 Ready.
 ```
 
-The only steps that may need you: logging into ChatGPT (and, if you want a
-stable hostname, logging into Cloudflare once). A **new** workspace also asks
+The only steps that may need you: logging into ChatGPT (and, for a Cloudflare
+stable hostname, logging into Cloudflare once). If you already have a fixed
+HTTPS origin, configure it with `c2c endpoint configure`. A **new** workspace also asks
 you to create a ChatGPT Project (collection) once — pick **project-only
 memory**, name it after the workspace. If the sidebar has no Projects row,
 hover **Chats**, open the … menu, and choose **Organize by project**. Codex
@@ -140,6 +143,23 @@ you can authorize Cloudflare. After that, the ChatGPT connector keeps working
 across restarts. If you skip it, or login fails, Codex stays on the temporary
 address — same features, just a slower repair.
 
+### Bring your own HTTPS endpoint
+
+If you already operate a public HTTPS origin such as `https://c2c.example.com`,
+configure it with:
+
+```bash
+c2c endpoint configure -w /path/to/workspace --url https://c2c.example.com
+```
+
+C2C does not manage the VPS, reverse proxy, WireGuard, DNS, or TLS. Keep the
+bridge loopback-only and use a host-local relay on the home server's private
+interface to forward WireGuard traffic to `127.0.0.1:<c2c-port>`. The external
+URL must be an HTTPS origin; path prefixes are not supported. The connector URL
+stays stable across bridge restarts. `c2c doctor` reports an endpoint that
+cannot be verified from the home server as a warning and does not switch to
+Cloudflare or replace the connector automatically.
+
 Credentials stay in the OS app state directory, not in the project.
 
 ## How it works
@@ -157,7 +177,8 @@ Credentials stay in the OS app state directory, not in the project.
              │      C2C Bridge     │   loopback-only HTTP server
              │  read-only MCP      │   OAuth 2.1 + one-time pairing code
              │  OAuth + Pairing    │   Cloudflare Quick Tunnel
-             │  Tunnel Manager     │
+             │  Quick/Named Tunnel │
+             │  or external ingress│
              └──────────┬──────────┘
                         │  read-only
                         ▼
@@ -192,6 +213,8 @@ Credentials stay in the OS app state directory, not in the project.
 - **The model never sees long-lived credentials**: the only secret that ever
   touches a browser is a one-time pairing code (5-minute TTL, 5 attempts,
   rate-limited, destroyed on use).
+- **External ingress stays constrained**: C2C remains loopback-only; `/health`
+  uses opaque instance identities and the external relay must be private.
 
 Full threat model: [docs/security.md](docs/security.md)
 
@@ -200,15 +223,17 @@ Full threat model: [docs/security.md](docs/security.md)
 ```bash
 pnpm install
 pnpm build          # -> dist/, exposes the `c2c` bin
-pnpm test           # vitest: 76 tests (path security, OAuth, pairing, MCP e2e)
+pnpm test           # vitest (path security, OAuth, pairing, MCP e2e)
 
-c2c setup           # bridge + tunnel + pairing code, all in one
+c2c setup           # bridge + public connection + pairing code, all in one
+c2c endpoint configure --url https://c2c.example.com
 c2c sandbox-allow   # whitelist the settings dir in Codex (macOS + Windows)
 c2c status / doctor / pair / unpair / logs / stop
 ```
 
-Requirements: Node.js >= 20, git. `cloudflared` for the public connection
-(auto-detected; the Skill installs it for you).
+Requirements: Node.js >= 20, git. `cloudflared` is needed only for
+C2C-managed Cloudflare connections; an external endpoint needs its own
+user-managed ingress.
 
 Docs: [architecture](docs/architecture.md) · [protocol](docs/protocol.md) ·
 [security](docs/security.md) · [troubleshooting](docs/troubleshooting.md)
@@ -222,7 +247,7 @@ src/
   auth/       OAuth 2.1 (PKCE, DCR, refresh rotation, revocation)
   pairing/    one-time pairing codes (CSPRNG, TTL, rate limits)
   workspace/  path containment, sensitive-file policy, search, git
-  tunnel/     TunnelProvider abstraction + Cloudflare Quick/Named Tunnel
+  tunnel/     TunnelProvider + Cloudflare Quick/Named + external ingress
   execution/  execution records for the review loop
   process/    daemon lifecycle
   cli/        the c2c CLI
@@ -233,7 +258,7 @@ docs/         architecture / protocol / security / troubleshooting
 
 ## Status & disclaimer
 
-V1. Verified end-to-end: bridge, OAuth + pairing, public tunnel, ChatGPT
+V1. Verified end-to-end: bridge, OAuth + pairing, public connection, ChatGPT
 connector setup, zero-touch first-run experience.
 
 **Unofficial community project. Not affiliated with or endorsed by OpenAI.**

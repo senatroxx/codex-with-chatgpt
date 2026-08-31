@@ -33,6 +33,7 @@ export function normalizeNamedTunnelHostname(hostname: string): string {
  */
 export class CloudflaredNamedTunnel implements TunnelProvider {
   readonly name = "cloudflare-named";
+  readonly managed = true;
   private readonly tunnelName: string;
   private readonly hostname: string;
   private readonly logger: Logger;
@@ -164,6 +165,7 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
       running: this.child !== null && this.connected,
       url: this.connected ? this.publicUrl() : null,
       provider: this.name,
+      managed: this.managed,
       detail: this.lastError ?? undefined,
     };
   }
@@ -180,6 +182,7 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
     if (this.child && !this.connected) problems.push("named tunnel is not connected yet");
     return {
       provider: this.name,
+      managed: this.managed,
       binaryFound: bin !== null,
       binaryPath: bin,
       running: this.child !== null && this.connected,
