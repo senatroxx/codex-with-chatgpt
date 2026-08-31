@@ -85,6 +85,21 @@ describe("external endpoint state and provider", () => {
     expect(duplicateExternalEndpointIds("ws1", "https://c2c.example.com")).toEqual(["ws2"]);
   });
 
+  it("preserves pending connector repair across provider changes", () => {
+    stateDirs.push(isolateStateDir());
+    chooseExternalEndpoint("ws1", "https://c2c.example.com", "c2c_ep_test", {
+      action: "update",
+      previousMcpUrl: "https://old.example.com/mcp",
+    });
+
+    const state = chooseQuickTunnel("ws1");
+    expect(state).toMatchObject({
+      preference: "quick",
+      pendingConnectorAction: "update",
+      pendingPreviousMcpUrl: "https://old.example.com/mcp",
+    });
+  });
+
   it("has inert lifecycle methods and does not need cloudflared", async () => {
     const provider = new ExternalEndpointProvider({
       url: "https://c2c.example.com",

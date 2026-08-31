@@ -166,7 +166,7 @@ describe("external endpoint CLI behavior", () => {
     }
   }, 30_000);
 
-  it("preserves the original pending repair after loading the changed endpoint", async () => {
+  it("clears the pending repair after loading and restoring the changed endpoint", async () => {
     stateDirs.push(isolateStateDir());
     const env = { ...commandEnv(), PATH: "/definitely-no-cloudflared" };
     const root = makeTmpDir("external-cli-restore");
@@ -183,17 +183,16 @@ describe("external endpoint CLI behavior", () => {
 
       const restored = await runCli(["endpoint", "configure", "--url", "https://c2c-a.example.com", "--workspace", root, "--json"], env);
       expect(restored.code).toBe(0);
-      expect(json<{ connectorAction: string; pendingConnectorAction: string | null; state: { pendingPreviousMcpUrl?: string } }>(restored)).toMatchObject({
-        connectorAction: "update",
-        pendingConnectorAction: "update",
-        state: { pendingPreviousMcpUrl: "https://c2c-a.example.com/mcp" },
+      expect(json<{ connectorAction: string; pendingConnectorAction: string | null }>(restored)).toMatchObject({
+        connectorAction: "none",
+        pendingConnectorAction: null,
       });
 
       const started = await runCli(["start", "--workspace", root, "--json"], env);
       expect(started.code).toBe(0);
       expect(json<{ endpoint: { url: string; connectorAction: string } }>(started).endpoint).toMatchObject({
         url: "https://c2c-a.example.com",
-        connectorAction: "update",
+        connectorAction: "none",
       });
     } finally {
       await stop(root, env);

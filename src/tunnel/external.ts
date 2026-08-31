@@ -110,50 +110,89 @@ export function assertPublicExternalAddresses(addresses: readonly LookupAddress[
   }
 }
 
-async function probeExternalHealth(url: string, timeoutMs: number): Promise<ExternalHealthResponse> {
-  const parsed = new URL(url);
-  const hostname = parsed.hostname.replace(/^\[|\]$/g, "");
-  const addresses = await lookup(hostname, { all: true, verbatim: true });
-  assertPublicExternalAddresses(addresses);
-  const address = addresses[0];
-
-  return new Promise((resolve, reject) => {
-    const request = https.request(
-      {
-        hostname: address.address,
-        family: address.family,
-        port: parsed.port || 443,
-        path: "/health",
-        method: "GET",
-        servername: isIP(hostname) ? undefined : hostname.replace(/\.+$/, ""),
-        headers: { accept: "application/json", host: parsed.host },
-        lookup: (_hostname, _options, callback) => callback(null, address.address, address.family),
-      },
-      (response) => {
-        let body = "";
-        response.setEncoding("utf8");
-        response.on("data", (chunk: string) => {
-          body += chunk;
-        });
-        response.on("error", reject);
-        response.on("end", () => {
-          try {
-            resolve({ status: response.statusCode ?? 0, body: JSON.parse(body) });
-          } catch {
-            resolve({ status: response.statusCode ?? 0, body: null });
-          }
-        });
-      }
-    );
-    request.setTimeout(timeoutMs, () => request.destroy(new Error(`External endpoint probe timed out after ${timeoutMs}ms`)));
-    request.on("error", reject);
-    request.end();
-  });
-}
-
 export interface ExternalHealthResponse {
   status: number;
   body: unknown;
+}
+
+async function probeExternalHealth(url: string, timeoutMs: number): Promise<ExternalHealthResponse> {
+  const parsed = new URL(url);
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, "");
+  const deadline = Date.now() + timeoutMs;
+  const addresses = await withTimeout(lookup(hostname, { all: true, verbatim: true }), timeoutMs);
+  assertPublicExternalAddresses(addresses);
+  let lastError: unknown;
+  for (const address of addresses) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error(`External endpoint probe timed out after ${timeoutMs}ms`);
+    try {
+      return await probeExternalHealthAddress(parsed, hostname, address, remaining);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("External endpoint could not be reached");
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`External endpoint probe timed out after ${timeoutMs}ms`)), timeoutMs);
+    promise.then(resolve, reject).finally(() => clearTimeout(timer));
+  });
+}
+
+function probeExternalHealthAddress(
+  parsed: URL,
+  hostname: string,
+  address: LookupAddress,
+  timeoutMs: number
+): Promise<ExternalHealthResponse> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let request: ReturnType<typeof https.request> | undefined;
+    const timer = setTimeout(() => request?.destroy(new Error(`External endpoint probe timed out after ${timeoutMs}ms`)), timeoutMs);
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      callback();
+    };
+    try {
+      request = https.request(
+        {
+          hostname: address.address,
+          family: address.family,
+          port: parsed.port || 443,
+          path: "/health",
+          method: "GET",
+          servername: isIP(hostname) ? undefined : hostname.replace(/\.+$/, ""),
+          headers: { accept: "application/json", host: parsed.host },
+          lookup: (_hostname, _options, callback) => callback(null, address.address, address.family),
+        },
+        (response) => {
+          let body = "";
+          response.setEncoding("utf8");
+          response.on("data", (chunk: string) => {
+            body += chunk;
+          });
+          response.on("error", (error) => finish(() => reject(error)));
+          response.on("end", () =>
+            finish(() => {
+              try {
+                resolve({ status: response.statusCode ?? 0, body: JSON.parse(body) });
+              } catch {
+                resolve({ status: response.statusCode ?? 0, body: null });
+              }
+            })
+          );
+        }
+      );
+      request.on("error", (error) => finish(() => reject(error)));
+      request.end();
+    } catch (error) {
+      finish(() => reject(error));
+    }
+  });
 }
 
 export class ExternalEndpointProvider implements TunnelProvider {

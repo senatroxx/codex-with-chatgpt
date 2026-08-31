@@ -3,7 +3,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureDir, getStateDir } from "../config/paths.js";
-import { findLiveBridge, readProcessStartIdentity, readRuntimeState, type RuntimeState } from "../bridge/runtime.js";
+import {
+  findLiveBridge,
+  readProcessCommandLine,
+  readProcessStartIdentity,
+  readRuntimeState,
+  type RuntimeState,
+} from "../bridge/runtime.js";
 import { Workspace } from "../workspace/manager.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -111,8 +117,9 @@ export async function stopBridge(workspaceRoot: string): Promise<boolean> {
   }
   if (!stopRequested) {
     const ownsProcess =
-      runtime.processStartIdentity !== undefined &&
-      readProcessStartIdentity(runtime.pid) === runtime.processStartIdentity;
+      runtime.processStartIdentity
+        ? readProcessStartIdentity(runtime.pid) === runtime.processStartIdentity
+        : processCommandMatchesRuntime(runtime);
     if (!ownsProcess) {
       if (!processIsAlive(runtime.pid)) return false;
       throw new Error(
@@ -146,4 +153,9 @@ function processIsAlive(pid: number): boolean {
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "EPERM";
   }
+}
+
+function processCommandMatchesRuntime(runtime: RuntimeState): boolean {
+  const commandLine = readProcessCommandLine(runtime.pid);
+  return Boolean(commandLine && /(?:^|\s)serve(?:\s|$)/.test(commandLine) && commandLine.includes(runtime.workspaceRoot));
 }

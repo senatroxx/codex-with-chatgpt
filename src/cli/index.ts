@@ -733,7 +733,7 @@ program
       if (currentUrl && healthy) {
         report.tunnel = { ok: true, detail: currentUrl };
         const nextMcp = mcpUrlFromPublic(currentUrl);
-        const action = connectorAction(lastEndpoint?.mcpUrl, nextMcp);
+        const action = pending?.action ?? connectorAction(lastEndpoint?.mcpUrl, nextMcp);
         const boundName = nextMcp
           ? persistWorkspaceEndpoint({
               workspaceId: info.workspaceId,
@@ -752,7 +752,7 @@ program
           connectorName: boundName,
           userMessage: action === "update" ? reclaimUserMessage(boundName) : undefined,
           mcpUrl: nextMcp,
-          previousMcpUrl: lastEndpoint?.mcpUrl ?? null,
+          previousMcpUrl: pending?.previousMcpUrl ?? lastEndpoint?.mcpUrl ?? null,
         };
         if (action === "update") {
           try {
@@ -1219,11 +1219,12 @@ endpointCmd
         nextMcpUrl &&
         normalizePublicUrl(existingPending.previousMcpUrl) === normalizePublicUrl(nextMcpUrl);
       const pendingRepair =
-        action === "update"
-          ? existingPending ?? { action, previousMcpUrl: previousEndpoint?.mcpUrl ?? null }
-          : restoredPrevious
-            ? undefined
+        restoredPrevious
+          ? undefined
+          : action === "update"
+            ? existingPending ?? { action, previousMcpUrl: previousEndpoint?.mcpUrl ?? null }
             : existingPending;
+      const configuredAction = restoredPrevious ? "none" : action;
       const state = chooseExternalEndpoint(
         workspace.id,
         url,
@@ -1238,7 +1239,7 @@ endpointCmd
         managed: false,
         url,
         mcpUrl: nextMcpUrl,
-        connectorAction: action,
+        connectorAction: configuredAction,
         pendingConnectorAction: state.pendingConnectorAction ?? null,
         duplicateWarning: duplicateIds.length > 0,
         duplicateWorkspaceIds: duplicateIds,
@@ -1247,7 +1248,7 @@ endpointCmd
       if (opts.json) say(JSON.stringify(payload));
       else {
         check(`已配置外部入口：${url}`);
-        if (action === "update") say("需要更新当前工作区的 ChatGPT 连接器。");
+        if (configuredAction === "update") say("需要更新当前工作区的 ChatGPT 连接器。");
         if (duplicateIds.length > 0) say("警告：另一个工作区也配置了相同地址，请确认反向代理只指向当前工作区。");
       }
     } catch (error) {
