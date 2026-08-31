@@ -50,6 +50,8 @@ describe("external endpoint URL", () => {
     expect(() => normalizeExternalEndpointUrl("https://[::1]")).toThrow(/origin/);
     expect(() => normalizeExternalEndpointUrl("https://[fd00::2]")).toThrow(/origin/);
     expect(() => normalizeExternalEndpointUrl("https://[fe80::2]")).toThrow(/origin/);
+    expect(() => normalizeExternalEndpointUrl("https://[fec0::1]")).toThrow(/origin/);
+    expect(() => normalizeExternalEndpointUrl("https://[feff::1]")).toThrow(/origin/);
     expect(() => normalizeExternalEndpointUrl("https://[::ffff:c0a8:101]")).toThrow(/origin/);
     expect(() => normalizeExternalEndpointUrl("https://[::ffff:7f00:1]")).toThrow(/origin/);
   });
@@ -57,6 +59,8 @@ describe("external endpoint URL", () => {
   it("rejects private addresses returned by DNS", () => {
     expect(() => assertPublicExternalAddresses([{ address: "127.0.0.1", family: 4 }])).toThrow(/private or local/);
     expect(() => assertPublicExternalAddresses([{ address: "::ffff:c0a8:101", family: 6 }])).toThrow(/private or local/);
+    expect(() => assertPublicExternalAddresses([{ address: "fec0::1", family: 6 }])).toThrow(/private or local/);
+    expect(() => assertPublicExternalAddresses([{ address: "feff::1", family: 6 }])).toThrow(/private or local/);
     expect(() => assertPublicExternalAddresses([{ address: "93.184.216.34", family: 4 }])).not.toThrow();
   });
 });

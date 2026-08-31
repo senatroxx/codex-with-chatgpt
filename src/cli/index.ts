@@ -75,11 +75,13 @@ function relayTarget(port: number): string {
   return `127.0.0.1:${port}`;
 }
 
-function pendingProviderSwitch(state: TunnelState, target: "quick" | "named") {
+function pendingProviderSwitch(state: TunnelState, target: "quick" | "named", nextMcpUrl?: string | null) {
   const pending = pendingConnectorRepair(state);
-  if (pending || state.preference === target) return pending;
+  if (pending) return pending;
   const previous = readLastEndpoint(state.workspaceId);
-  return previous?.mcpUrl ? { action: "update" as const, previousMcpUrl: previous.mcpUrl } : undefined;
+  if (!previous?.mcpUrl || (state.preference === target && !nextMcpUrl)) return undefined;
+  if (nextMcpUrl && connectorAction(previous.mcpUrl, nextMcpUrl) === "none") return undefined;
+  return { action: "update" as const, previousMcpUrl: previous.mcpUrl };
 }
 
 function preservePendingRepair(state: TunnelState, pending: ReturnType<typeof pendingProviderSwitch>): TunnelState {
@@ -511,6 +513,7 @@ program
       runtime = await findLiveBridge(workspace.id);
       if (!runtime && opts.fix) {
         try {
+          if (readRuntimeState(workspace.id)) await stopBridge(root);
           runtime = (await ensureBridge(root)).runtime;
           results.push("已自动启动 Bridge");
         } catch (error) {
@@ -595,6 +598,7 @@ program
       userMessage?: string;
       mcpUrl: string | null;
       previousMcpUrl: string | null;
+      acknowledgmentRequired: boolean;
       pairingCode?: string;
       pairingExpiresAt?: number;
       pages: {
@@ -613,6 +617,7 @@ program
         plugins: CHATGPT_PLUGINS_URL,
         createConnector: CHATGPT_CREATE_CONNECTOR_URL,
       },
+      acknowledgmentRequired: false,
     };
 
     if (externalConfigured) {
@@ -662,7 +667,7 @@ program
               };
             }
 
-            if (reachability === "reachable") {
+            if (reachability !== "wrong_instance") {
               const nextMcp = mcpUrlFromPublic(external.url);
               const action = pending?.action ?? connectorAction(lastEndpoint?.mcpUrl, nextMcp);
               const previousMcpUrl = pending?.previousMcpUrl ?? lastEndpoint?.mcpUrl ?? null;
@@ -685,6 +690,7 @@ program
                 userMessage: action === "update" ? reclaimUserMessage(boundName) : undefined,
                 mcpUrl: nextMcp,
                 previousMcpUrl,
+                acknowledgmentRequired: Boolean(pending),
               };
               if (action === "update") {
                 try {
@@ -771,6 +777,7 @@ program
           userMessage: action === "update" ? reclaimUserMessage(boundName) : undefined,
           mcpUrl: nextMcp,
           previousMcpUrl: pending?.previousMcpUrl ?? lastEndpoint?.mcpUrl ?? null,
+          acknowledgmentRequired: Boolean(pending),
         };
         if (action === "update") {
           try {
@@ -1279,7 +1286,7 @@ endpointCmd
   .description("Acknowledge that the external ChatGPT connector repair completed")
   .option("-w, --workspace <path>")
   .option("--json", "machine-readable output", false)
-  .action((opts: { workspace?: string; json: boolean }) => {
+  .action(async (opts: { workspace?: string; json: boolean }) => {
     try {
       const workspace = new Workspace(resolveWorkspace(opts.workspace));
       const state = readTunnelState(workspace.id);
@@ -1292,8 +1299,28 @@ endpointCmd
       }
       const external = externalEndpointBinding(state);
       const effective = readLastEndpoint(workspace.id);
-      const currentMcpUrl = external ? mcpUrlFromPublic(external.url) : effective?.mcpUrl ?? null;
-      if (!currentMcpUrl || !effective?.mcpUrl || normalizePublicUrl(effective.mcpUrl) !== normalizePublicUrl(currentMcpUrl)) {
+      const runtime = await findLiveBridge(workspace.id);
+      if (!runtime) throw new Error("Connector repair is not ready to acknowledge; run c2c start or c2c doctor first");
+      const info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
+      const expectedProvider =
+        state.preference === "external"
+          ? "external"
+          : state.preference === "named"
+            ? "cloudflare-named"
+            : state.preference === "quick"
+              ? "cloudflare-quick"
+              : null;
+      const loadedUrl = info.publicUrl ?? info.tunnel.url;
+      const loadedMcpUrl = mcpUrlFromPublic(loadedUrl);
+      if (
+        !expectedProvider ||
+        info.tunnel.provider !== expectedProvider ||
+        !info.tunnel.running ||
+        !loadedMcpUrl ||
+        !effective?.mcpUrl ||
+        normalizePublicUrl(effective.mcpUrl) !== normalizePublicUrl(loadedMcpUrl) ||
+        (external && normalizePublicUrl(mcpUrlFromPublic(external.url) ?? "") !== normalizePublicUrl(loadedMcpUrl))
+      ) {
         throw new Error("Connector repair is not ready to acknowledge; run c2c start or c2c doctor first");
       }
       if (
@@ -1390,7 +1417,8 @@ tunnelCmd
         zone,
         hostname: opts.hostname,
       });
-      const state = preservePendingRepair(result.state, pendingProviderSwitch(previous, "named"));
+      const namedMcpUrl = result.state.hostname ? mcpUrlFromPublic(`https://${result.state.hostname}`) : null;
+      const state = preservePendingRepair(result.state, pendingProviderSwitch(previous, "named", namedMcpUrl));
       if (readRuntimeState(workspace.id)) await stopBridge(root);
       const payload = {
         ...tunnelChoicePayload(workspace),

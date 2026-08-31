@@ -65,6 +65,7 @@ function isPrivateOrLocalLiteral(hostname: string): boolean {
       value === "::1" ||
       /^(?:fc|fd)/.test(value) ||
       /^fe[89ab]/.test(value) ||
+      /^fe[c-f]/.test(value) ||
       /^ff/.test(value) ||
       /^2001:db8(?::|$)/.test(value) ||
       (mapped !== null && isPrivateOrLocalIpv4(mapped))
@@ -119,7 +120,10 @@ async function probeExternalHealth(url: string, timeoutMs: number): Promise<Exte
   const parsed = new URL(url);
   const hostname = parsed.hostname.replace(/^\[|\]$/g, "");
   const deadline = Date.now() + timeoutMs;
-  const addresses = await resolvePublicExternalAddresses(hostname, Math.max(1, deadline - Date.now()));
+  const family = isIP(hostname);
+  const addresses = family
+    ? [{ address: hostname, family: family as 4 | 6 }]
+    : await resolvePublicExternalAddresses(hostname, Math.max(1, deadline - Date.now()));
   assertPublicExternalAddresses(addresses);
   let lastError: unknown;
   for (const [index, address] of addresses.entries()) {

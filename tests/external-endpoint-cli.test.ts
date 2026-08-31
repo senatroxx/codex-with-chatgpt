@@ -65,6 +65,13 @@ function fakeCloudflaredEnv(): NodeJS.ProcessEnv {
 if [ "$1" = "--version" ]; then exit 0; fi
 if [ "$1" = "tunnel" ] && [ "$2" = "list" ]; then printf '[]'; exit 0; fi
 if [ "$1" = "tunnel" ] && [ "$2" = "create" ]; then printf 'Created tunnel c2c with id 44444444-4444-4444-4444-444444444444\\n'; exit 0; fi
+if [ "$1" = "tunnel" ] && [ "$2" = "--url" ]; then
+  printf 'https://quick.trycloudflare.com\\n'
+  trap 'kill "$child" 2>/dev/null; exit 0' TERM INT
+  sleep 30 & child=$!
+  wait "$child"
+  exit 0
+fi
 exit 0
 `
   );
@@ -128,7 +135,7 @@ describe("external endpoint CLI behavior", () => {
       ).toMatchObject({
         externalEndpoint: { reachability: "unverified", connectorAction: "update" },
         externalRepair: { needed: false },
-        chatgptRepair: { needed: false },
+        chatgptRepair: { needed: true, connectorAction: "update", acknowledgmentRequired: true },
       });
       expect(outage.stdout).not.toContain("NEED_CLOUDFLARED");
 
@@ -225,7 +232,7 @@ describe("external endpoint CLI behavior", () => {
 
   it("acknowledges a preserved repair after switching to a managed provider", async () => {
     stateDirs.push(isolateStateDir());
-    const env = { ...commandEnv(), PATH: "/definitely-no-cloudflared" };
+    const env = fakeCloudflaredEnv();
     const root = makeTmpDir("external-cli-ack-managed");
     tempDirs.push(root);
     write(root, "hello.txt", "hello\n");
@@ -236,19 +243,52 @@ describe("external endpoint CLI behavior", () => {
       expect((await runCli(["endpoint", "configure", "--url", "https://c2c-b.example.com", "--workspace", root, "--json"], env)).code).toBe(0);
       const switched = await runCli(["tunnel", "choose", "--mode", "quick", "--workspace", root, "--json"], env);
       expect(switched.code).toBe(0);
+      const notReady = await runCli(["endpoint", "acknowledge-repair", "--workspace", root, "--json"], env);
+      expect(notReady.code).toBe(1);
+      expect(notReady.stdout).toContain("run c2c start or c2c doctor first");
 
-      const workspace = new Workspace(root);
-      writeLastEndpoint({
-        workspaceId: workspace.id,
-        port: 48765,
-        publicUrl: "https://quick.example.com",
-        mcpUrl: "https://quick.example.com/mcp",
-      });
+      const started = await runCli(["start", "--tunnel", "--workspace", root, "--json"], env);
+      expect(started.code).toBe(0);
       const acknowledged = await runCli(["endpoint", "acknowledge-repair", "--workspace", root, "--json"], env);
       expect(acknowledged.code).toBe(0);
       expect(json<{ acknowledged: boolean; connectorAction: string }>(acknowledged)).toMatchObject({
         acknowledged: true,
         connectorAction: "none",
+      });
+    } finally {
+      await stop(root, env);
+    }
+  }, 30_000);
+
+  it("records a connector repair when reprovisioning a named hostname", async () => {
+    stateDirs.push(isolateStateDir());
+    const env = fakeCloudflaredEnv();
+    const root = makeTmpDir("named-hostname-change");
+    tempDirs.push(root);
+    write(root, "hello.txt", "hello\n");
+
+    try {
+      const first = await runCli(
+        ["tunnel", "choose", "--mode", "named", "--zone", "example.com", "--hostname", "c2c-a.example.com", "--workspace", root, "--json"],
+        env
+      );
+      expect(first.code).toBe(0);
+      const workspace = new Workspace(root);
+      writeLastEndpoint({
+        workspaceId: workspace.id,
+        port: 48765,
+        publicUrl: "https://c2c-a.example.com",
+        mcpUrl: "https://c2c-a.example.com/mcp",
+      });
+
+      const changed = await runCli(
+        ["tunnel", "choose", "--mode", "named", "--zone", "example.com", "--hostname", "c2c-b.example.com", "--workspace", root, "--json"],
+        env
+      );
+      expect(changed.code).toBe(0);
+      expect(json<{ state: { pendingConnectorAction: string; pendingPreviousMcpUrl: string } }>(changed).state).toMatchObject({
+        pendingConnectorAction: "update",
+        pendingPreviousMcpUrl: "https://c2c-a.example.com/mcp",
       });
     } finally {
       await stop(root, env);
@@ -361,6 +401,82 @@ describe("external endpoint CLI behavior", () => {
         if (daemonPid) process.kill(daemonPid, "SIGTERM");
       } catch {
         // The provider switch already stopped the stale process.
+      }
+      if (unhealthy.exitCode === null) unhealthy.kill("SIGTERM");
+      await stop(root, env);
+    }
+  }, 30_000);
+
+  it("doctor stops an unhealthy persisted daemon before restoring external mode", async () => {
+    stateDirs.push(isolateStateDir());
+    const env = { ...commandEnv(), PATH: "/definitely-no-cloudflared" };
+    const root = makeTmpDir("external-doctor-unhealthy");
+    tempDirs.push(root);
+    write(root, "hello.txt", "hello\n");
+    const workspace = new Workspace(root);
+    writeTunnelState({
+      workspaceId: workspace.id,
+      preference: "external",
+      externalUrl: "https://c2c-doctor.example.com",
+      endpointId: "c2c_ep_doctor",
+    });
+    const serverScript = 'const http = require("node:http"); const server = http.createServer((_, response) => response.end("not c2c")); server.listen(48765, "127.0.0.1");';
+    const unhealthy = spawn(
+      process.execPath,
+      [
+        "-e",
+        `const { spawn } = require("node:child_process"); const child = spawn(process.execPath, ["-e", ${JSON.stringify(serverScript)}], { detached: true, stdio: "ignore" }); console.log(child.pid); child.unref();`,
+      ],
+      { stdio: ["ignore", "pipe", "pipe"] }
+    );
+    let daemonPid = 0;
+
+    try {
+      daemonPid = Number(
+        await new Promise<string>((resolve, reject) => {
+          unhealthy.stdout?.once("data", (chunk: Buffer) => resolve(chunk.toString("utf8").trim()));
+          unhealthy.once("error", reject);
+          unhealthy.once("close", (code) => reject(new Error(`unhealthy daemon launcher exited before ready: ${code}`)));
+        })
+      );
+      let occupied = false;
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        try {
+          const response = await fetch("http://127.0.0.1:48765/health");
+          await response.text();
+          occupied = true;
+          break;
+        } catch {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      }
+      expect(occupied).toBe(true);
+      writeRuntimeState({
+        service: "c2c-bridge",
+        version: "0.1.0",
+        workspaceId: workspace.id,
+        workspaceRoot: root,
+        pid: daemonPid,
+        processStartIdentity: readProcessStartIdentity(daemonPid)!,
+        port: 48765,
+        adminToken: "stale-token",
+        instanceId: "stale-instance",
+        publicUrl: "https://c2c-doctor.example.com",
+        startedAt: new Date().toISOString(),
+      });
+
+      const result = await runCli(["doctor", "--workspace", root, "--json"], env);
+      expect(result.code).toBe(0);
+      expect(json<{ report: { bridge: { ok: boolean } }; externalEndpoint: { configured: boolean } }>(result)).toMatchObject({
+        report: { bridge: { ok: true } },
+        externalEndpoint: { configured: true },
+      });
+      expect(result.stdout).not.toContain("EADDRINUSE");
+    } finally {
+      try {
+        if (daemonPid) process.kill(daemonPid, "SIGTERM");
+      } catch {
+        // The doctor already stopped the stale process.
       }
       if (unhealthy.exitCode === null) unhealthy.kill("SIGTERM");
       await stop(root, env);

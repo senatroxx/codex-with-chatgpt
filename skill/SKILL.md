@@ -577,9 +577,7 @@ and external endpoints keep their URL across bridge restarts.
      Then Connect / Authorize and type `chatgptRepair.pairingCode`
      (or `c2c pair --json` if it expired). Continue as soon as it is Connected —
      do not wait for 8 tools on the settings page.
-   - For an external endpoint, after it visibly shows Connected, run
-     `c2c endpoint acknowledge-repair -w <workspace> --json`. Only continue
-     after it returns `acknowledged: true`.
+   - If `chatgptRepair.acknowledgmentRequired` is true (including a repair preserved while switching from external to a managed provider), after it visibly shows Connected, run `c2c endpoint acknowledge-repair -w <workspace> --json`. Only continue after it returns `acknowledged: true`.
    - If the name is already gone, skip Delete and only create.
 4. `c2c doctor --json` again. Same tab: only after the Doctor gate is green,
    reopen the chat this Codex thread was already using (`session.url` /
