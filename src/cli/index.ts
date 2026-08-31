@@ -1213,10 +1213,17 @@ endpointCmd
       const previousEndpoint = readLastEndpoint(workspace.id);
       const nextMcpUrl = mcpUrlFromPublic(url);
       const action = connectorAction(previousEndpoint?.mcpUrl, nextMcpUrl);
+      const restoredPrevious =
+        existingPending &&
+        existingPending.previousMcpUrl &&
+        nextMcpUrl &&
+        normalizePublicUrl(existingPending.previousMcpUrl) === normalizePublicUrl(nextMcpUrl);
       const pendingRepair =
         action === "update"
           ? { action, previousMcpUrl: previousEndpoint?.mcpUrl ?? null }
-          : existingPending;
+          : restoredPrevious
+            ? undefined
+            : existingPending;
       const state = chooseExternalEndpoint(
         workspace.id,
         url,
@@ -1224,7 +1231,7 @@ endpointCmd
         pendingRepair ?? undefined
       );
       const duplicateIds = duplicateExternalEndpointIds(workspace.id, url);
-      if (await findLiveBridge(workspace.id)) await stopBridge(root);
+      if (readRuntimeState(workspace.id)) await stopBridge(root);
       const payload = {
         ok: true,
         mode: "external",
@@ -1326,7 +1333,7 @@ tunnelCmd
       const previous = readTunnelState(workspace.id);
       if (mode === "quick") {
         const state = chooseQuickTunnel(workspace.id);
-        if (await findLiveBridge(workspace.id)) {
+        if (readRuntimeState(workspace.id)) {
           if (previous.preference !== "quick") await stopBridge(root);
         }
         const payload = { ...tunnelChoicePayload(workspace), state };
@@ -1359,7 +1366,7 @@ tunnelCmd
         zone,
         hostname: opts.hostname,
       });
-      if (await findLiveBridge(workspace.id)) await stopBridge(root);
+      if (readRuntimeState(workspace.id)) await stopBridge(root);
       const payload = {
         ...tunnelChoicePayload(workspace),
         ok: true,

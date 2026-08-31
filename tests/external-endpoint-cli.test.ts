@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { makeTmpDir, cleanup, isolateStateDir, write } from "./helpers.js";
 import { Workspace } from "../src/workspace/manager.js";
+import { writeRuntimeState } from "../src/bridge/runtime.js";
 import { writeTunnelState } from "../src/tunnel/state.js";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -165,6 +166,36 @@ describe("external endpoint CLI behavior", () => {
     }
   }, 30_000);
 
+  it("clears a pending repair when restoring the previous effective endpoint", async () => {
+    stateDirs.push(isolateStateDir());
+    const env = { ...commandEnv(), PATH: "/definitely-no-cloudflared" };
+    const root = makeTmpDir("external-cli-restore");
+    tempDirs.push(root);
+    write(root, "hello.txt", "hello\n");
+
+    try {
+      expect((await runCli(["endpoint", "configure", "--url", "https://c2c-a.example.com", "--workspace", root, "--json"], env)).code).toBe(0);
+      expect((await runCli(["start", "--workspace", root, "--json"], env)).code).toBe(0);
+      expect((await runCli(["endpoint", "configure", "--url", "https://c2c-b.example.com", "--workspace", root, "--json"], env)).code).toBe(0);
+
+      const restored = await runCli(["endpoint", "configure", "--url", "https://c2c-a.example.com", "--workspace", root, "--json"], env);
+      expect(restored.code).toBe(0);
+      expect(json<{ connectorAction: string; pendingConnectorAction: string | null }>(restored)).toMatchObject({
+        connectorAction: "none",
+        pendingConnectorAction: null,
+      });
+
+      const started = await runCli(["start", "--workspace", root, "--json"], env);
+      expect(started.code).toBe(0);
+      expect(json<{ endpoint: { url: string; connectorAction: string } }>(started).endpoint).toMatchObject({
+        url: "https://c2c-a.example.com",
+        connectorAction: "none",
+      });
+    } finally {
+      await stop(root, env);
+    }
+  }, 30_000);
+
   it.each([
     ["quick", "external"],
     ["external", "quick"],
@@ -202,6 +233,76 @@ describe("external endpoint CLI behavior", () => {
       const payload = json<{ tunnel: { provider: string } }>(status);
       expect(payload.tunnel.provider).toBe(to === "external" ? "external" : `cloudflare-${to}`);
     } finally {
+      await stop(root, env);
+    }
+  }, 30_000);
+
+  it("stops an unhealthy persisted daemon before changing external mode", async () => {
+    stateDirs.push(isolateStateDir());
+    const env = { ...commandEnv(), PATH: "/definitely-no-cloudflared" };
+    const root = makeTmpDir("external-unhealthy-switch");
+    tempDirs.push(root);
+    write(root, "hello.txt", "hello\n");
+    const serverScript = 'const http = require("node:http"); const server = http.createServer((_, response) => response.end("not c2c")); server.listen(48765, "127.0.0.1");';
+    const unhealthy = spawn(
+      process.execPath,
+      [
+        "-e",
+        `const { spawn } = require("node:child_process"); const child = spawn(process.execPath, ["-e", ${JSON.stringify(serverScript)}], { detached: true, stdio: "ignore" }); console.log(child.pid); child.unref();`,
+      ],
+      { stdio: ["ignore", "pipe", "pipe"] }
+    );
+    let daemonPid = 0;
+
+    try {
+      daemonPid = Number(
+        await new Promise<string>((resolve, reject) => {
+          unhealthy.stdout?.once("data", (chunk: Buffer) => resolve(chunk.toString("utf8").trim()));
+          unhealthy.once("error", reject);
+          unhealthy.once("close", (code) => reject(new Error(`unhealthy daemon launcher exited before ready: ${code}`)));
+        })
+      );
+      expect(Number.isInteger(daemonPid)).toBe(true);
+      let occupied = false;
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        try {
+          const response = await fetch("http://127.0.0.1:48765/health");
+          await response.text();
+          occupied = true;
+          break;
+        } catch {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      }
+      expect(occupied).toBe(true);
+      const workspace = new Workspace(root);
+      writeTunnelState({ workspaceId: workspace.id, preference: "quick", askedAt: new Date().toISOString() });
+      writeRuntimeState({
+        service: "c2c-bridge",
+        version: "0.1.0",
+        workspaceId: workspace.id,
+        workspaceRoot: root,
+        pid: daemonPid,
+        port: 48765,
+        adminToken: "stale-token",
+        instanceId: "stale-instance",
+        publicUrl: null,
+        startedAt: new Date().toISOString(),
+      });
+
+      const configured = await runCli(["endpoint", "configure", "--url", "https://c2c-unhealthy-switch.example.com", "--workspace", root, "--json"], env);
+      expect(configured.code).toBe(0);
+
+      const started = await runCli(["start", "--workspace", root, "--json"], env);
+      expect(started.code).toBe(0);
+      expect(json<{ endpoint: { mode: string } }>(started).endpoint.mode).toBe("external");
+    } finally {
+      try {
+        if (daemonPid) process.kill(daemonPid, "SIGTERM");
+      } catch {
+        // The provider switch already stopped the stale process.
+      }
+      if (unhealthy.exitCode === null) unhealthy.kill("SIGTERM");
       await stop(root, env);
     }
   }, 30_000);

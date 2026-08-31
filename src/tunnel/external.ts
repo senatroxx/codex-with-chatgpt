@@ -75,6 +75,7 @@ export function normalizeExternalEndpointUrl(input: string): string {
   }
   const hostname = parsed.hostname.toLowerCase();
   const hostnameWithoutBrackets = hostname.replace(/^\[|\]$/g, "");
+  const hostnameForChecks = hostnameWithoutBrackets.replace(/\.+$/, "");
   if (
     parsed.protocol !== "https:" ||
     !hostname ||
@@ -85,9 +86,9 @@ export function normalizeExternalEndpointUrl(input: string): string {
     parsed.hash ||
     trimmed.includes("?") ||
     trimmed.includes("#") ||
-    hostname === "localhost" ||
-    hostname.endsWith(".localhost") ||
-    isPrivateOrLocalLiteral(hostnameWithoutBrackets)
+    hostnameForChecks === "localhost" ||
+    hostnameForChecks.endsWith(".localhost") ||
+    isPrivateOrLocalLiteral(hostnameForChecks)
   ) {
     throw new Error("External endpoint must be an HTTPS public origin, such as https://c2c.example.com");
   }
