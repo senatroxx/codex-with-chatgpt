@@ -43,6 +43,8 @@ describe("external endpoint URL", () => {
     expect(() => normalizeExternalEndpointUrl("https://[::1]")).toThrow(/origin/);
     expect(() => normalizeExternalEndpointUrl("https://[fd00::2]")).toThrow(/origin/);
     expect(() => normalizeExternalEndpointUrl("https://[fe80::2]")).toThrow(/origin/);
+    expect(() => normalizeExternalEndpointUrl("https://[::ffff:c0a8:101]")).toThrow(/origin/);
+    expect(() => normalizeExternalEndpointUrl("https://[::ffff:7f00:1]")).toThrow(/origin/);
   });
 });
 

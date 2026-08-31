@@ -97,7 +97,7 @@ describe("external endpoint CLI behavior", () => {
       expect(json<{ endpoint: { url: string; relayTarget: string; connectorAction: string } }>(startedA).endpoint).toMatchObject({
         url: "https://c2c-a.example.com",
         relayTarget: "127.0.0.1:48765",
-        connectorAction: "create",
+        connectorAction: "none",
       });
 
       const configuredB = await runCli(["endpoint", "configure", "--url", "https://c2c-b.invalid", "--workspace", root, "--json"], env);
@@ -132,14 +132,28 @@ describe("external endpoint CLI behavior", () => {
 
       const configuredAgain = await runCli(["endpoint", "configure", "--url", "https://c2c-b.invalid/", "--workspace", root, "--json"], env);
       expect(configuredAgain.code).toBe(0);
-      expect(json<{ connectorAction: string; pendingConnectorAction: null }>(configuredAgain)).toMatchObject({
+      expect(json<{ connectorAction: string; pendingConnectorAction: string }>(configuredAgain)).toMatchObject({
         connectorAction: "none",
-        pendingConnectorAction: null,
+        pendingConnectorAction: "update",
       });
 
       const startedAgain = await runCli(["start", "--workspace", root, "--json"], env);
       expect(startedAgain.code).toBe(0);
-      expect(json<{ endpoint: { connectorAction: string } }>(startedAgain).endpoint.connectorAction).toBe("none");
+      expect(json<{ endpoint: { connectorAction: string } }>(startedAgain).endpoint.connectorAction).toBe("update");
+
+      const acknowledged = await runCli(["endpoint", "acknowledge-repair", "--workspace", root, "--json"], env);
+      expect(acknowledged.code).toBe(0);
+      expect(json<{ acknowledged: boolean; connectorAction: string }>(acknowledged)).toMatchObject({
+        acknowledged: true,
+        connectorAction: "none",
+      });
+
+      const configuredAfterAck = await runCli(["endpoint", "configure", "--url", "https://c2c-b.invalid/", "--workspace", root, "--json"], env);
+      expect(configuredAfterAck.code).toBe(0);
+      expect(json<{ connectorAction: string; pendingConnectorAction: null }>(configuredAfterAck)).toMatchObject({
+        connectorAction: "none",
+        pendingConnectorAction: null,
+      });
 
       const restarted = await runCli(["restart", "--workspace", root], env);
       expect(restarted.code).toBe(0);

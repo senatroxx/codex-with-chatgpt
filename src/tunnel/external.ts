@@ -11,28 +11,54 @@ export interface ExternalEndpointOptions {
   logger?: Logger;
 }
 
+function isPrivateOrLocalIpv4(value: string): boolean {
+  const octets = value.split(".").map(Number);
+  if (octets.length !== 4 || octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) return false;
+  const [first, second] = octets;
+  return (
+    first === 0 ||
+    first === 10 ||
+    first === 127 ||
+    (first === 169 && second === 254) ||
+    (first === 172 && second >= 16 && second <= 31) ||
+    (first === 192 && second === 168)
+  );
+}
+
+function mappedIpv4(value: string): string | null {
+  const halves = value.split("::");
+  if (halves.length > 2) return null;
+  const left = halves[0] ? halves[0].split(":") : [];
+  let right = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const dotted = right.at(-1);
+  if (dotted?.includes(".")) {
+    right = right.slice(0, -1);
+    const octets = dotted.split(".").map(Number);
+    if (octets.length !== 4 || octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) return null;
+    right.push(((octets[0] << 8) | octets[1]).toString(16), ((octets[2] << 8) | octets[3]).toString(16));
+  }
+  const groups = [...left, ...(halves.length === 2 ? Array(8 - left.length - right.length).fill("0") : []), ...right];
+  if (groups.length !== 8 || groups.slice(0, 5).some((group) => parseInt(group, 16) !== 0) || parseInt(groups[5], 16) !== 0xffff) {
+    return null;
+  }
+  const high = parseInt(groups[6], 16);
+  const low = parseInt(groups[7], 16);
+  if (!Number.isInteger(high) || !Number.isInteger(low)) return null;
+  return `${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`;
+}
+
 function isPrivateOrLocalLiteral(hostname: string): boolean {
   const value = hostname.replace(/^\[|\]$/g, "").toLowerCase();
   const version = isIP(value);
-  if (version === 4) {
-    const octets = value.split(".").map(Number);
-    const [first, second] = octets;
-    return (
-      first === 0 ||
-      first === 10 ||
-      first === 127 ||
-      (first === 169 && second === 254) ||
-      (first === 172 && second >= 16 && second <= 31) ||
-      (first === 192 && second === 168)
-    );
-  }
+  if (version === 4) return isPrivateOrLocalIpv4(value);
   if (version === 6) {
+    const mapped = mappedIpv4(value);
     return (
       value === "::" ||
       value === "::1" ||
       /^(?:fc|fd)/.test(value) ||
       /^fe[89ab]/.test(value) ||
-      (value.startsWith("::ffff:") && isPrivateOrLocalLiteral(value.slice(7)))
+      (mapped !== null && isPrivateOrLocalIpv4(mapped))
     );
   }
   return false;

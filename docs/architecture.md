@@ -90,7 +90,9 @@ are warnings, while a health response for another endpoint identity is an
 error. External mode never starts or falls back to Cloudflare.
 An explicit `c2c endpoint configure --url ...` compares the canonical origin
 with the last effective connector URL and persists any pending connector
-update, so bridge startup or setup cannot erase that intent.
+update, so bridge startup or setup cannot erase that intent. Doctor requests the
+repair but leaves it pending until the Skill explicitly acknowledges the
+successful ChatGPT connection with `c2c endpoint acknowledge-repair`.
 
 The Skill asks before the first public URL exists. Cloudflare login is needed
 only for named provisioning. Tunnel name, hostname, and preference live under

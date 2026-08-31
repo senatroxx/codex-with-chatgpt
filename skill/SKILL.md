@@ -252,6 +252,11 @@ Speak only of 临时地址 / 固定域名 / 登录 Cloudflare.
      Fill the known form in one script when you can. Then Connect / Authorize
      and type the pairing code. As soon as it shows Connected / authorized /
      pairing accepted, continue — do NOT wait for 8 tools on this page.
+     If an external endpoint reports a pending connector update, after it
+     visibly shows Connected, run `c2c endpoint acknowledge-repair -w <ws> --json`
+     and require `acknowledged: true` before continuing. This is the
+     explicit confirmation that lets C2C retire the pending connector-repair
+     state.
 5. Same tab: open the first C2C chat per **Conversation management**
    (Project collection for a new workspace; `https://chatgpt.com/` only
    in long-chat). Confirm Chat mode per **In-app browser** §7 (if it is Work,
@@ -309,7 +314,9 @@ next action:
 4. Ask them to Connect / Authorize and enter the current pairing code. If it
    expired, run `c2c pair --json` and give them only the fresh pairing code.
 5. When they report Connected / authorized / pairing accepted, resume the normal
-   setup/reconnect flow at its ChatGPT verification step. If automatic browser
+   setup/reconnect flow at its ChatGPT verification step. For an external
+   endpoint, acknowledge it with `c2c endpoint acknowledge-repair -w <workspace> --json`
+   before resuming. If automatic browser
    verification then hits the same explicit failure twice, stop and report the
    exact failed step; do not loop indefinitely and do not continue without C2C.
 
@@ -570,6 +577,9 @@ and external endpoints keep their URL across bridge restarts.
      Then Connect / Authorize and type `chatgptRepair.pairingCode`
      (or `c2c pair --json` if it expired). Continue as soon as it is Connected —
      do not wait for 8 tools on the settings page.
+   - For an external endpoint, after it visibly shows Connected, run
+     `c2c endpoint acknowledge-repair -w <workspace> --json`. Only continue
+     after it returns `acknowledged: true`.
    - If the name is already gone, skip Delete and only create.
 4. `c2c doctor --json` again. Same tab: only after the Doctor gate is green,
    reopen the chat this Codex thread was already using (`session.url` /

@@ -673,7 +673,6 @@ program
                   const pairing = await adminFetch<PairingResponse>(runtime, "POST", "/admin/pairing");
                   chatgptRepair.pairingCode = pairing.code;
                   chatgptRepair.pairingExpiresAt = pairing.expiresAt;
-                  if (pending?.action === "update") clearPendingConnectorRepair(info.workspaceId);
                   results.push(`已生成新的配对码，需要更新「${boundName}」`);
                 } catch (error) {
                   report.oauth = { ok: false, detail: (error as Error).message };
@@ -1210,16 +1209,19 @@ endpointCmd
       const url = normalizeExternalEndpointUrl(opts.url);
       const previous = readTunnelState(workspace.id);
       const previousExternal = externalEndpointBinding(previous);
+      const existingPending = pendingConnectorRepair(previous);
       const previousEndpoint = readLastEndpoint(workspace.id);
       const nextMcpUrl = mcpUrlFromPublic(url);
       const action = connectorAction(previousEndpoint?.mcpUrl, nextMcpUrl);
+      const pendingRepair =
+        action === "update"
+          ? { action, previousMcpUrl: previousEndpoint?.mcpUrl ?? null }
+          : existingPending;
       const state = chooseExternalEndpoint(
         workspace.id,
         url,
         previousExternal?.url === url ? previousExternal.endpointId : undefined,
-        action === "none"
-          ? undefined
-          : { action, previousMcpUrl: previousEndpoint?.mcpUrl ?? null }
+        pendingRepair ?? undefined
       );
       const duplicateIds = duplicateExternalEndpointIds(workspace.id, url);
       if (await findLiveBridge(workspace.id)) await stopBridge(root);
@@ -1241,6 +1243,45 @@ endpointCmd
         if (action === "update") say("需要更新当前工作区的 ChatGPT 连接器。");
         if (duplicateIds.length > 0) say("警告：另一个工作区也配置了相同地址，请确认反向代理只指向当前工作区。");
       }
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+endpointCmd
+  .command("acknowledge-repair")
+  .description("Acknowledge that the external ChatGPT connector repair completed")
+  .option("-w, --workspace <path>")
+  .option("--json", "machine-readable output", false)
+  .action((opts: { workspace?: string; json: boolean }) => {
+    try {
+      const workspace = new Workspace(resolveWorkspace(opts.workspace));
+      const state = readTunnelState(workspace.id);
+      const pending = pendingConnectorRepair(state);
+      if (!pending) {
+        const payload = { ok: true, acknowledged: false, connectorAction: "none" };
+        if (opts.json) say(JSON.stringify(payload));
+        else say("没有待确认的外部连接器修复。");
+        return;
+      }
+      const external = externalEndpointBinding(state);
+      if (!external) throw new Error("External endpoint configuration is incomplete or invalid");
+      const currentMcpUrl = mcpUrlFromPublic(external.url);
+      const effective = readLastEndpoint(workspace.id);
+      if (!currentMcpUrl || !effective?.mcpUrl || normalizePublicUrl(effective.mcpUrl) !== normalizePublicUrl(currentMcpUrl)) {
+        throw new Error("External connector repair is not ready to acknowledge; run c2c start or c2c doctor first");
+      }
+      const cleared = clearPendingConnectorRepair(workspace.id);
+      const payload = {
+        ok: true,
+        acknowledged: true,
+        connectorAction: "none",
+        url: external.url,
+        previousMcpUrl: pending.previousMcpUrl,
+        state: cleared,
+      };
+      if (opts.json) say(JSON.stringify(payload));
+      else check("已确认外部 ChatGPT 连接器修复完成。");
     } catch (error) {
       handleCliError(error, opts.json);
     }

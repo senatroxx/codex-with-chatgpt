@@ -161,6 +161,8 @@ cannot be verified from the home server as a warning and does not switch to
 Cloudflare or replace the connector automatically.
 External mode uses the preferred local relay target `127.0.0.1:48765`; if that
 port is occupied, startup fails instead of silently choosing another port.
+After ChatGPT confirms the connector is Connected, the Skill acknowledges the
+repair with `c2c endpoint acknowledge-repair`.
 
 Credentials stay in the OS app state directory, not in the project.
 

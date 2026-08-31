@@ -65,6 +65,11 @@ that port, external-mode startup fails; free the port or stop the conflicting
 service. It will not silently choose an ephemeral port that your relay does
 not know about.
 
+After ChatGPT shows the external connector as Connected, run
+`c2c endpoint acknowledge-repair -w /path/to/workspace --json` so the pending
+repair is recorded as completed. If the browser repair is interrupted, leave
+the pending state in place and repeat the repair.
+
 ### I have a Cloudflare domain and want a stable hostname
 During first-time setup (or the next coding session, once), say you have a
 Cloudflare account and give the domain. Codex opens a browser for Cloudflare
