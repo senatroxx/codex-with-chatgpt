@@ -23,7 +23,7 @@ export interface RuntimeState {
   startedAt: string;
 }
 
-/** Linux process start time (from /proc) prevents stale PID reuse from being killed. */
+/** Process start identity prevents stale PID reuse from being killed. */
 export function readProcessStartIdentity(pid: number): string | null {
   if (!Number.isInteger(pid) || pid <= 0) return null;
   try {

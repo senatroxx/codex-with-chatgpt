@@ -1,6 +1,5 @@
 import { isIP } from "node:net";
-import { lookup } from "node:dns/promises";
-import type { LookupAddress } from "node:dns";
+import { Resolver, type LookupAddress } from "node:dns";
 import https from "node:https";
 import type { Logger } from "../logger/index.js";
 import { nullLogger } from "../logger/index.js";
@@ -25,7 +24,8 @@ function isPrivateOrLocalIpv4(value: string): boolean {
     first === 127 ||
     (first === 169 && second === 254) ||
     (first === 172 && second >= 16 && second <= 31) ||
-    (first === 192 && (second === 0 || second === 168)) ||
+    (first === 192 && second === 168) ||
+    (first === 192 && second === 0 && (third === 0 || third === 2)) ||
     (first === 198 && (second === 18 || second === 19 || (second === 51 && third === 100))) ||
     (first === 203 && second === 0 && third === 113) ||
     first >= 224
@@ -119,14 +119,15 @@ async function probeExternalHealth(url: string, timeoutMs: number): Promise<Exte
   const parsed = new URL(url);
   const hostname = parsed.hostname.replace(/^\[|\]$/g, "");
   const deadline = Date.now() + timeoutMs;
-  const addresses = await withTimeout(lookup(hostname, { all: true, verbatim: true }), timeoutMs);
+  const addresses = await resolvePublicExternalAddresses(hostname, Math.max(1, deadline - Date.now()));
   assertPublicExternalAddresses(addresses);
   let lastError: unknown;
-  for (const address of addresses) {
+  for (const [index, address] of addresses.entries()) {
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw new Error(`External endpoint probe timed out after ${timeoutMs}ms`);
+    const perAddressTimeout = Math.max(1, Math.floor(remaining / (addresses.length - index)));
     try {
-      return await probeExternalHealthAddress(parsed, hostname, address, remaining);
+      return await probeExternalHealthAddress(parsed, hostname, address, perAddressTimeout);
     } catch (error) {
       lastError = error;
     }
@@ -134,12 +135,35 @@ async function probeExternalHealth(url: string, timeoutMs: number): Promise<Exte
   throw lastError instanceof Error ? lastError : new Error("External endpoint could not be reached");
 }
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+function resolvePublicExternalAddresses(hostname: string, timeoutMs: number): Promise<LookupAddress[]> {
+  const resolver = new Resolver();
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`External endpoint probe timed out after ${timeoutMs}ms`)), timeoutMs);
-    promise.then(resolve, reject).finally(() => clearTimeout(timer));
+    let settled = false;
+    let pending = 2;
+    let lastError: NodeJS.ErrnoException | null = null;
+    const addresses: LookupAddress[] = [];
+    const timer = setTimeout(() => {
+      settled = true;
+      resolver.cancel();
+      reject(new Error(`External endpoint probe timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    const finish = (error: NodeJS.ErrnoException | null, values: string[], family: 4 | 6): void => {
+      if (settled) return;
+      if (error) lastError = error;
+      else addresses.push(...values.map((address) => ({ address, family })));
+      pending -= 1;
+      if (pending > 0) return;
+      settled = true;
+      clearTimeout(timer);
+      if (addresses.length > 0) resolve(addresses);
+      else reject(lastError ?? new Error("External endpoint DNS lookup returned no addresses"));
+    };
+    resolver.resolve4(hostname, (error, values) => finish(error, values ?? [], 4));
+    resolver.resolve6(hostname, (error, values) => finish(error, values ?? [], 6));
   });
 }
+
+const MAX_HEALTH_BODY_BYTES = 64 * 1024;
 
 function probeExternalHealthAddress(
   parsed: URL,
@@ -174,6 +198,10 @@ function probeExternalHealthAddress(
           response.setEncoding("utf8");
           response.on("data", (chunk: string) => {
             body += chunk;
+            if (Buffer.byteLength(body, "utf8") > MAX_HEALTH_BODY_BYTES) {
+              finish(() => reject(new Error(`External endpoint health response exceeded ${MAX_HEALTH_BODY_BYTES} bytes`)));
+              request?.destroy();
+            }
           });
           response.on("error", (error) => finish(() => reject(error)));
           response.on("end", () =>

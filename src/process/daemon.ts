@@ -157,5 +157,15 @@ function processIsAlive(pid: number): boolean {
 
 function processCommandMatchesRuntime(runtime: RuntimeState): boolean {
   const commandLine = readProcessCommandLine(runtime.pid);
-  return Boolean(commandLine && /(?:^|\s)serve(?:\s|$)/.test(commandLine) && commandLine.includes(runtime.workspaceRoot));
+  if (!commandLine || !/(?:^|\s)serve(?:\s|$)/.test(commandLine)) return false;
+  const cliEntries = [
+    path.resolve(__dirname, "..", "cli", "index.js"),
+    path.resolve(__dirname, "..", "cli", "index.ts"),
+    path.resolve(__dirname, "..", "..", "src", "cli", "index.ts"),
+  ];
+  if (!cliEntries.some((entry) => commandLine.includes(entry))) return false;
+  const escapedWorkspace = runtime.workspaceRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(
+    `(?:^|\\s)--workspace(?:=|\\s+)(?:"${escapedWorkspace}"|'${escapedWorkspace}'|${escapedWorkspace})(?=\\s|$)`
+  ).test(commandLine);
 }

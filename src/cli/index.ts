@@ -30,6 +30,8 @@ import {
   pendingConnectorRepair,
   readTunnelState,
   TUNNEL_CHOICE_PROMPT,
+  type TunnelState,
+  writeTunnelState,
 } from "../tunnel/state.js";
 import { Logger } from "../logger/index.js";
 import { DEFAULT_PORT, getStateDir } from "../config/paths.js";
@@ -71,6 +73,22 @@ function resolveWorkspace(option?: string): string {
 
 function relayTarget(port: number): string {
   return `127.0.0.1:${port}`;
+}
+
+function pendingProviderSwitch(state: TunnelState, target: "quick" | "named") {
+  const pending = pendingConnectorRepair(state);
+  if (pending || state.preference === target) return pending;
+  const previous = readLastEndpoint(state.workspaceId);
+  return previous?.mcpUrl ? { action: "update" as const, previousMcpUrl: previous.mcpUrl } : undefined;
+}
+
+function preservePendingRepair(state: TunnelState, pending: ReturnType<typeof pendingProviderSwitch>): TunnelState {
+  if (!pending || pendingConnectorRepair(state)) return state;
+  return writeTunnelState({
+    ...state,
+    pendingConnectorAction: pending.action,
+    pendingPreviousMcpUrl: pending.previousMcpUrl,
+  });
 }
 
 function persistWorkspaceEndpoint(opts: {
@@ -1269,22 +1287,27 @@ endpointCmd
       if (!pending) {
         const payload = { ok: true, acknowledged: false, connectorAction: "none" };
         if (opts.json) say(JSON.stringify(payload));
-        else say("没有待确认的外部连接器修复。");
+        else say("没有待确认的连接器修复。");
         return;
       }
       const external = externalEndpointBinding(state);
-      if (!external) throw new Error("External endpoint configuration is incomplete or invalid");
-      const currentMcpUrl = mcpUrlFromPublic(external.url);
       const effective = readLastEndpoint(workspace.id);
+      const currentMcpUrl = external ? mcpUrlFromPublic(external.url) : effective?.mcpUrl ?? null;
       if (!currentMcpUrl || !effective?.mcpUrl || normalizePublicUrl(effective.mcpUrl) !== normalizePublicUrl(currentMcpUrl)) {
-        throw new Error("External connector repair is not ready to acknowledge; run c2c start or c2c doctor first");
+        throw new Error("Connector repair is not ready to acknowledge; run c2c start or c2c doctor first");
+      }
+      if (
+        pending.previousMcpUrl &&
+        normalizePublicUrl(effective.mcpUrl) === normalizePublicUrl(pending.previousMcpUrl)
+      ) {
+        throw new Error("Connector repair is not ready to acknowledge; start the new endpoint first");
       }
       const cleared = clearPendingConnectorRepair(workspace.id);
       const payload = {
         ok: true,
         acknowledged: true,
         connectorAction: "none",
-        url: external.url,
+        url: external?.url ?? effective.publicUrl,
         previousMcpUrl: pending.previousMcpUrl,
         state: cleared,
       };
@@ -1333,7 +1356,7 @@ tunnelCmd
       const mode = opts.mode.trim().toLowerCase();
       const previous = readTunnelState(workspace.id);
       if (mode === "quick") {
-        const state = chooseQuickTunnel(workspace.id);
+        const state = preservePendingRepair(chooseQuickTunnel(workspace.id), pendingProviderSwitch(previous, "quick"));
         if (readRuntimeState(workspace.id)) {
           if (previous.preference !== "quick") await stopBridge(root);
         }
@@ -1367,6 +1390,7 @@ tunnelCmd
         zone,
         hostname: opts.hostname,
       });
+      const state = preservePendingRepair(result.state, pendingProviderSwitch(previous, "named"));
       if (readRuntimeState(workspace.id)) await stopBridge(root);
       const payload = {
         ...tunnelChoicePayload(workspace),
@@ -1374,7 +1398,7 @@ tunnelCmd
         fallback: result.fallback,
         userMessage: result.userMessage,
         error: result.error,
-        state: result.state,
+        state,
       };
       if (opts.json) {
         say(JSON.stringify(payload));

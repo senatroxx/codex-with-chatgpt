@@ -7,6 +7,7 @@ import { makeTmpDir, cleanup, isolateStateDir, write } from "./helpers.js";
 import { Workspace } from "../src/workspace/manager.js";
 import { readProcessStartIdentity, writeRuntimeState } from "../src/bridge/runtime.js";
 import { writeTunnelState } from "../src/tunnel/state.js";
+import { writeLastEndpoint } from "../src/config/endpoint.js";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const cliEntry = path.join(projectRoot, "src", "cli", "index.ts");
@@ -216,6 +217,38 @@ describe("external endpoint CLI behavior", () => {
       expect(json<{ connectorAction: string; pendingConnectorAction: string | null }>(restored)).toMatchObject({
         connectorAction: "none",
         pendingConnectorAction: null,
+      });
+    } finally {
+      await stop(root, env);
+    }
+  }, 30_000);
+
+  it("acknowledges a preserved repair after switching to a managed provider", async () => {
+    stateDirs.push(isolateStateDir());
+    const env = { ...commandEnv(), PATH: "/definitely-no-cloudflared" };
+    const root = makeTmpDir("external-cli-ack-managed");
+    tempDirs.push(root);
+    write(root, "hello.txt", "hello\n");
+
+    try {
+      expect((await runCli(["endpoint", "configure", "--url", "https://c2c-a.example.com", "--workspace", root, "--json"], env)).code).toBe(0);
+      expect((await runCli(["start", "--workspace", root, "--json"], env)).code).toBe(0);
+      expect((await runCli(["endpoint", "configure", "--url", "https://c2c-b.example.com", "--workspace", root, "--json"], env)).code).toBe(0);
+      const switched = await runCli(["tunnel", "choose", "--mode", "quick", "--workspace", root, "--json"], env);
+      expect(switched.code).toBe(0);
+
+      const workspace = new Workspace(root);
+      writeLastEndpoint({
+        workspaceId: workspace.id,
+        port: 48765,
+        publicUrl: "https://quick.example.com",
+        mcpUrl: "https://quick.example.com/mcp",
+      });
+      const acknowledged = await runCli(["endpoint", "acknowledge-repair", "--workspace", root, "--json"], env);
+      expect(acknowledged.code).toBe(0);
+      expect(json<{ acknowledged: boolean; connectorAction: string }>(acknowledged)).toMatchObject({
+        acknowledged: true,
+        connectorAction: "none",
       });
     } finally {
       await stop(root, env);
