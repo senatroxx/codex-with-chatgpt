@@ -1,4 +1,7 @@
 import { isIP } from "node:net";
+import { lookup } from "node:dns/promises";
+import type { LookupAddress } from "node:dns";
+import https from "node:https";
 import type { Logger } from "../logger/index.js";
 import { nullLogger } from "../logger/index.js";
 import { SERVICE_NAME } from "../version.js";
@@ -14,14 +17,18 @@ export interface ExternalEndpointOptions {
 function isPrivateOrLocalIpv4(value: string): boolean {
   const octets = value.split(".").map(Number);
   if (octets.length !== 4 || octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) return false;
-  const [first, second] = octets;
+  const [first, second, third] = octets;
   return (
     first === 0 ||
     first === 10 ||
+    (first === 100 && second >= 64 && second <= 127) ||
     first === 127 ||
     (first === 169 && second === 254) ||
     (first === 172 && second >= 16 && second <= 31) ||
-    (first === 192 && second === 168)
+    (first === 192 && (second === 0 || second === 168)) ||
+    (first === 198 && (second === 18 || second === 19 || (second === 51 && third === 100))) ||
+    (first === 203 && second === 0 && third === 113) ||
+    first >= 224
   );
 }
 
@@ -58,6 +65,8 @@ function isPrivateOrLocalLiteral(hostname: string): boolean {
       value === "::1" ||
       /^(?:fc|fd)/.test(value) ||
       /^fe[89ab]/.test(value) ||
+      /^ff/.test(value) ||
+      /^2001:db8(?::|$)/.test(value) ||
       (mapped !== null && isPrivateOrLocalIpv4(mapped))
     );
   }
@@ -93,6 +102,58 @@ export function normalizeExternalEndpointUrl(input: string): string {
     throw new Error("External endpoint must be an HTTPS public origin, such as https://c2c.example.com");
   }
   return parsed.origin;
+}
+
+export function assertPublicExternalAddresses(addresses: readonly LookupAddress[]): void {
+  if (addresses.length === 0 || addresses.some(({ address }) => isPrivateOrLocalLiteral(address))) {
+    throw new Error("External endpoint resolves to a private or local address; refusing to probe");
+  }
+}
+
+async function probeExternalHealth(url: string, timeoutMs: number): Promise<ExternalHealthResponse> {
+  const parsed = new URL(url);
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, "");
+  const addresses = await lookup(hostname, { all: true, verbatim: true });
+  assertPublicExternalAddresses(addresses);
+  const address = addresses[0];
+
+  return new Promise((resolve, reject) => {
+    const request = https.request(
+      {
+        hostname: address.address,
+        family: address.family,
+        port: parsed.port || 443,
+        path: "/health",
+        method: "GET",
+        servername: isIP(hostname) ? undefined : hostname.replace(/\.+$/, ""),
+        headers: { accept: "application/json", host: parsed.host },
+        lookup: (_hostname, _options, callback) => callback(null, address.address, address.family),
+      },
+      (response) => {
+        let body = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk: string) => {
+          body += chunk;
+        });
+        response.on("error", reject);
+        response.on("end", () => {
+          try {
+            resolve({ status: response.statusCode ?? 0, body: JSON.parse(body) });
+          } catch {
+            resolve({ status: response.statusCode ?? 0, body: null });
+          }
+        });
+      }
+    );
+    request.setTimeout(timeoutMs, () => request.destroy(new Error(`External endpoint probe timed out after ${timeoutMs}ms`)));
+    request.on("error", reject);
+    request.end();
+  });
+}
+
+export interface ExternalHealthResponse {
+  status: number;
+  body: unknown;
 }
 
 export class ExternalEndpointProvider implements TunnelProvider {
@@ -137,15 +198,15 @@ export class ExternalEndpointProvider implements TunnelProvider {
     return this.url;
   }
 
+  protected async probeHealth(): Promise<ExternalHealthResponse> {
+    return probeExternalHealth(this.url, this.timeoutMs);
+  }
+
   async doctor(): Promise<TunnelDoctorReport> {
     const problems: string[] = [];
     try {
-      const response = await fetch(`${this.url}/health`, {
-        signal: AbortSignal.timeout(this.timeoutMs),
-        redirect: "error",
-        headers: { accept: "application/json" },
-      });
-      if (!response.ok) {
+      const response = await this.probeHealth();
+      if (response.status < 200 || response.status >= 300) {
         return {
           provider: this.name,
           managed: this.managed,
@@ -155,7 +216,7 @@ export class ExternalEndpointProvider implements TunnelProvider {
           problems: [`External endpoint returned HTTP ${response.status}`],
         };
       }
-      const body = (await response.json().catch(() => null)) as
+      const body = response.body as
         | { service?: unknown; endpointId?: unknown }
         | null;
       if (body?.service !== SERVICE_NAME || body.endpointId !== this.healthIdentity) {

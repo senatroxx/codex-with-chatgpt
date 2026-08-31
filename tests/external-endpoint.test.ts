@@ -3,7 +3,12 @@ import { createServer, type AddressInfo } from "node:net";
 import path from "node:path";
 import { startBridge } from "../src/bridge/server.js";
 import { Workspace } from "../src/workspace/manager.js";
-import { ExternalEndpointProvider, normalizeExternalEndpointUrl } from "../src/tunnel/external.js";
+import {
+  assertPublicExternalAddresses,
+  ExternalEndpointProvider,
+  normalizeExternalEndpointUrl,
+  type ExternalHealthResponse,
+} from "../src/tunnel/external.js";
 import {
   chooseExternalEndpoint,
   duplicateExternalEndpointIds,
@@ -48,7 +53,22 @@ describe("external endpoint URL", () => {
     expect(() => normalizeExternalEndpointUrl("https://[::ffff:c0a8:101]")).toThrow(/origin/);
     expect(() => normalizeExternalEndpointUrl("https://[::ffff:7f00:1]")).toThrow(/origin/);
   });
+
+  it("rejects private addresses returned by DNS", () => {
+    expect(() => assertPublicExternalAddresses([{ address: "127.0.0.1", family: 4 }])).toThrow(/private or local/);
+    expect(() => assertPublicExternalAddresses([{ address: "::ffff:c0a8:101", family: 6 }])).toThrow(/private or local/);
+    expect(() => assertPublicExternalAddresses([{ address: "93.184.216.34", family: 4 }])).not.toThrow();
+  });
 });
+
+function stubExternalProvider(probe: () => Promise<ExternalHealthResponse>): ExternalEndpointProvider {
+  class StubExternalEndpointProvider extends ExternalEndpointProvider {
+    protected override probeHealth(): Promise<ExternalHealthResponse> {
+      return probe();
+    }
+  }
+  return new StubExternalEndpointProvider({ url: "https://c2c.example.com", endpointId: "c2c_ep_test" });
+}
 
 describe("external endpoint state and provider", () => {
   it("persists a minimal external configuration and warns on duplicate URLs", () => {
@@ -79,41 +99,24 @@ describe("external endpoint state and provider", () => {
   });
 
   it("verifies the opaque endpoint identity when the public health check works", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue(
-        new Response(JSON.stringify({ service: "c2c-bridge", endpointId: "c2c_ep_test" }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        })
-      )
-    );
-    const report = await new ExternalEndpointProvider({
-      url: "https://c2c.example.com",
-      endpointId: "c2c_ep_test",
-    }).doctor();
+    const report = await stubExternalProvider(async () => ({
+      status: 200,
+      body: { service: "c2c-bridge", endpointId: "c2c_ep_test" },
+    })).doctor();
     expect(report.reachability).toBe("reachable");
     expect(report.problems).toEqual([]);
   });
 
   it("reports network failures as unverified and wrong instances separately", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("hairpin unavailable")));
-    const unverified = await new ExternalEndpointProvider({
-      url: "https://c2c.example.com",
-      endpointId: "c2c_ep_test",
+    const unverified = await stubExternalProvider(async () => {
+      throw new Error("hairpin unavailable");
     }).doctor();
     expect(unverified.reachability).toBe("unverified");
 
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue(
-        new Response(JSON.stringify({ service: "c2c-bridge", endpointId: "c2c_ep_other" }), { status: 200 })
-      )
-    );
-    const wrongInstance = await new ExternalEndpointProvider({
-      url: "https://c2c.example.com",
-      endpointId: "c2c_ep_test",
-    }).doctor();
+    const wrongInstance = await stubExternalProvider(async () => ({
+      status: 200,
+      body: { service: "c2c-bridge", endpointId: "c2c_ep_other" },
+    })).doctor();
     expect(wrongInstance.reachability).toBe("wrong_instance");
   });
 });

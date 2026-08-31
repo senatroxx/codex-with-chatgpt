@@ -1220,7 +1220,7 @@ endpointCmd
         normalizePublicUrl(existingPending.previousMcpUrl) === normalizePublicUrl(nextMcpUrl);
       const pendingRepair =
         action === "update"
-          ? { action, previousMcpUrl: previousEndpoint?.mcpUrl ?? null }
+          ? existingPending ?? { action, previousMcpUrl: previousEndpoint?.mcpUrl ?? null }
           : restoredPrevious
             ? undefined
             : existingPending;

@@ -16,7 +16,7 @@ import { externalEndpointBinding, namedTunnelBinding, readTunnelState } from "..
 import { Logger, nullLogger } from "../logger/index.js";
 import { DEFAULT_HOST, DEFAULT_PORT } from "../config/paths.js";
 import { SERVICE_NAME, VERSION } from "../version.js";
-import { writeRuntimeState, clearRuntimeState, type RuntimeState } from "./runtime.js";
+import { readProcessStartIdentity, writeRuntimeState, clearRuntimeState, type RuntimeState } from "./runtime.js";
 
 function tunnelForWorkspace(workspaceId: string, logger: Logger): TunnelProvider {
   const state = readTunnelState(workspaceId);
@@ -255,6 +255,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     throw error;
   }
   const startedAt = new Date().toISOString();
+  const processIdentity = readProcessStartIdentity(process.pid);
   logger.info(`Bridge listening on ${host}:${port} for workspace ${workspace.name} (${workspace.id})`);
 
   const persistRuntime = (): void => {
@@ -265,6 +266,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
       workspaceId: workspace.id,
       workspaceRoot: workspace.root,
       pid: process.pid,
+      processStartIdentity: processIdentity ?? undefined,
       instanceId,
       port,
       adminToken,

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureDir, getStateDir } from "../config/paths.js";
-import { findLiveBridge, readRuntimeState, type RuntimeState } from "../bridge/runtime.js";
+import { findLiveBridge, readProcessStartIdentity, readRuntimeState, type RuntimeState } from "../bridge/runtime.js";
 import { Workspace } from "../workspace/manager.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -110,6 +110,15 @@ export async function stopBridge(workspaceRoot: string): Promise<boolean> {
     }
   }
   if (!stopRequested) {
+    const ownsProcess =
+      runtime.processStartIdentity !== undefined &&
+      readProcessStartIdentity(runtime.pid) === runtime.processStartIdentity;
+    if (!ownsProcess) {
+      if (!processIsAlive(runtime.pid)) return false;
+      throw new Error(
+        `Unable to verify bridge process ${runtime.pid} ownership; refusing to stop an unrelated process. Run c2c stop after confirming the old process.`
+      );
+    }
     try {
       process.kill(runtime.pid, "SIGTERM");
       stopRequested = true;
@@ -123,6 +132,7 @@ export async function stopBridge(workspaceRoot: string): Promise<boolean> {
   const deadline = Date.now() + STOP_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (!processIsAlive(runtime.pid)) return true;
+    if (runtime.processStartIdentity && readProcessStartIdentity(runtime.pid) !== runtime.processStartIdentity) return true;
     await new Promise((resolve) => setTimeout(resolve, STOP_POLL_MS));
   }
   if (!processIsAlive(runtime.pid)) return true;

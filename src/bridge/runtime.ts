@@ -14,11 +14,25 @@ export interface RuntimeState {
   workspaceId: string;
   workspaceRoot: string;
   pid: number;
+  processStartIdentity?: string;
   port: number;
   adminToken: string;
   instanceId?: string;
   publicUrl: string | null;
   startedAt: string;
+}
+
+/** Linux process start time (from /proc) prevents stale PID reuse from being killed. */
+export function readProcessStartIdentity(pid: number): string | null {
+  if (process.platform !== "linux") return null;
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+    const commandEnd = stat.lastIndexOf(")");
+    if (commandEnd < 0) return null;
+    return stat.slice(commandEnd + 2).trim().split(/\s+/)[19] ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export function runtimeFile(workspaceId: string): string {
