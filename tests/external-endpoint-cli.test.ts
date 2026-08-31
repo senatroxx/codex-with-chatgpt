@@ -290,6 +290,13 @@ describe("external endpoint CLI behavior", () => {
         pendingConnectorAction: "update",
         pendingPreviousMcpUrl: "https://c2c-a.example.com/mcp",
       });
+
+      const restored = await runCli(
+        ["tunnel", "choose", "--mode", "named", "--zone", "example.com", "--hostname", "c2c-a.example.com", "--workspace", root, "--json"],
+        env
+      );
+      expect(restored.code).toBe(0);
+      expect(json<{ state: { pendingConnectorAction?: string } }>(restored).state.pendingConnectorAction).toBeUndefined();
     } finally {
       await stop(root, env);
     }
@@ -325,6 +332,39 @@ describe("external endpoint CLI behavior", () => {
         preference: "quick",
         pendingConnectorAction: "update",
         pendingPreviousMcpUrl: "https://c2c-a.example.com/mcp",
+      });
+    } finally {
+      await stop(root, env);
+    }
+  }, 30_000);
+
+  it("records a connector repair when quick fallback replaces a quick URL", async () => {
+    stateDirs.push(isolateStateDir());
+    const env = fakeCloudflaredEnv();
+    const root = makeTmpDir("quick-fallback-repair");
+    tempDirs.push(root);
+    write(root, "hello.txt", "hello\n");
+
+    try {
+      const workspace = new Workspace(root);
+      const chosen = await runCli(["tunnel", "choose", "--mode", "quick", "--workspace", root, "--json"], env);
+      expect(chosen.code).toBe(0);
+      writeLastEndpoint({
+        workspaceId: workspace.id,
+        port: 48765,
+        publicUrl: "https://quick-a.trycloudflare.com",
+        mcpUrl: "https://quick-a.trycloudflare.com/mcp",
+      });
+
+      const fallback = await runCli(
+        ["tunnel", "choose", "--mode", "named", "--zone", "example.com", "--hostname", "invalid hostname", "--workspace", root, "--json"],
+        env
+      );
+      expect(fallback.code).toBe(0);
+      expect(json<{ state: { preference: string; pendingConnectorAction: string; pendingPreviousMcpUrl: string } }>(fallback).state).toMatchObject({
+        preference: "quick",
+        pendingConnectorAction: "update",
+        pendingPreviousMcpUrl: "https://quick-a.trycloudflare.com/mcp",
       });
     } finally {
       await stop(root, env);

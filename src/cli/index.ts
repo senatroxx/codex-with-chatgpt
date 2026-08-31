@@ -75,11 +75,16 @@ function relayTarget(port: number): string {
   return `127.0.0.1:${port}`;
 }
 
-function pendingProviderSwitch(state: TunnelState, target: "quick" | "named", nextMcpUrl?: string | null) {
+function pendingProviderSwitch(
+  state: TunnelState,
+  target: "quick" | "named",
+  nextMcpUrl?: string | null,
+  forceChange = false
+) {
   const pending = pendingConnectorRepair(state);
   if (pending) return pending;
   const previous = readLastEndpoint(state.workspaceId);
-  if (!previous?.mcpUrl || (state.preference === target && !nextMcpUrl)) return undefined;
+  if (!previous?.mcpUrl || (state.preference === target && !nextMcpUrl && !forceChange)) return undefined;
   if (nextMcpUrl && connectorAction(previous.mcpUrl, nextMcpUrl) === "none") return undefined;
   return { action: "update" as const, previousMcpUrl: previous.mcpUrl };
 }
@@ -1419,7 +1424,15 @@ tunnelCmd
       });
       const namedMcpUrl = result.state.hostname ? mcpUrlFromPublic(`https://${result.state.hostname}`) : null;
       const selectedProvider = result.state.preference === "named" ? "named" : "quick";
-      const state = preservePendingRepair(result.state, pendingProviderSwitch(previous, selectedProvider, namedMcpUrl));
+      const existingPending = pendingConnectorRepair(previous);
+      const restoresPendingEndpoint = Boolean(
+        existingPending?.previousMcpUrl &&
+          namedMcpUrl &&
+          normalizePublicUrl(existingPending.previousMcpUrl) === normalizePublicUrl(namedMcpUrl)
+      );
+      const state = restoresPendingEndpoint
+        ? clearPendingConnectorRepair(workspace.id)
+        : preservePendingRepair(result.state, pendingProviderSwitch(previous, selectedProvider, namedMcpUrl, result.fallback));
       if (readRuntimeState(workspace.id)) await stopBridge(root);
       const payload = {
         ...tunnelChoicePayload(workspace),
