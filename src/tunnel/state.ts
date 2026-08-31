@@ -2,8 +2,15 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { getStateDir, readJsonIfExists, writeSecureJson } from "../config/paths.js";
+import { normalizeExternalEndpointUrl } from "./external.js";
 
 export type TunnelPreference = "unset" | "quick" | "named" | "external";
+export type PendingConnectorAction = "create" | "update";
+
+export interface PendingConnectorRepair {
+  action: PendingConnectorAction;
+  previousMcpUrl: string | null;
+}
 
 export interface TunnelState {
   workspaceId: string;
@@ -18,6 +25,8 @@ export interface TunnelState {
   zone?: string;
   configuredAt?: string;
   fallbackReason?: string;
+  pendingConnectorAction?: PendingConnectorAction;
+  pendingPreviousMcpUrl?: string | null;
 }
 
 export function tunnelStateFile(workspaceId: string): string {
@@ -57,23 +66,51 @@ export function namedTunnelBinding(state: TunnelState): { tunnelName: string; ho
 
 export function externalEndpointBinding(state: TunnelState): { url: string; endpointId: string } | null {
   if (state.preference !== "external") return null;
-  const url = state.externalUrl?.trim();
+  const rawUrl = state.externalUrl?.trim();
   const endpointId = state.endpointId?.trim();
-  return url && endpointId ? { url, endpointId } : null;
+  if (!rawUrl || !endpointId) return null;
+  try {
+    return { url: normalizeExternalEndpointUrl(rawUrl), endpointId };
+  } catch {
+    return null;
+  }
+}
+
+export function pendingConnectorRepair(state: TunnelState): PendingConnectorRepair | null {
+  if (state.pendingConnectorAction !== "create" && state.pendingConnectorAction !== "update") return null;
+  return {
+    action: state.pendingConnectorAction,
+    previousMcpUrl: state.pendingPreviousMcpUrl ?? null,
+  };
+}
+
+export function clearPendingConnectorRepair(workspaceId: string): TunnelState {
+  const state = readTunnelState(workspaceId);
+  if (!state.pendingConnectorAction && state.pendingPreviousMcpUrl === undefined) return state;
+  const { pendingConnectorAction: _action, pendingPreviousMcpUrl: _previous, ...cleared } = state;
+  return writeTunnelState(cleared);
 }
 
 export function chooseExternalEndpoint(
   workspaceId: string,
   externalUrl: string,
-  endpointId = `c2c_ep_${randomBytes(18).toString("base64url")}`
+  endpointId = `c2c_ep_${randomBytes(18).toString("base64url")}`,
+  pending?: PendingConnectorRepair
 ): TunnelState {
+  const url = normalizeExternalEndpointUrl(externalUrl);
   return writeTunnelState({
     workspaceId,
     preference: "external",
     askedAt: new Date().toISOString(),
-    externalUrl,
+    externalUrl: url,
     endpointId,
     configuredAt: new Date().toISOString(),
+    ...(pending
+      ? {
+          pendingConnectorAction: pending.action,
+          pendingPreviousMcpUrl: pending.previousMcpUrl,
+        }
+      : {}),
   });
 }
 

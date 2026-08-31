@@ -60,6 +60,10 @@ a warning; it does not install Cloudflare, replace the connector, or fall back
 to a managed tunnel. A `wrong_instance` result means the proxy/relay is
 pointing at another C2C instance. Duplicate origins across workspaces are
 allowed but warned because one URL cannot route to both instances.
+The relay target defaults to `127.0.0.1:48765`. If another process occupies
+that port, external-mode startup fails; free the port or stop the conflicting
+service. It will not silently choose an ephemeral port that your relay does
+not know about.
 
 ### I have a Cloudflare domain and want a stable hostname
 During first-time setup (or the next coding session, once), say you have a

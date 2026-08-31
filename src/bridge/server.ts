@@ -62,10 +62,13 @@ export interface Bridge {
   close(): Promise<void>;
 }
 
-/**
- * Listen on the preferred port; on EADDRINUSE fall back to an ephemeral port.
- */
-function listen(app: express.Express, host: string, preferredPort: number): Promise<{ server: Server; port: number }> {
+/** Listen on the preferred port, optionally retaining the managed-tunnel fallback. */
+function listen(
+  app: express.Express,
+  host: string,
+  preferredPort: number,
+  allowFallback: boolean
+): Promise<{ server: Server; port: number }> {
   return new Promise((resolve, reject) => {
     const tryListen = (port: number, allowFallback: boolean): void => {
       const server = app.listen(port, host);
@@ -82,7 +85,7 @@ function listen(app: express.Express, host: string, preferredPort: number): Prom
         }
       });
     };
-    tryListen(preferredPort, preferredPort !== 0);
+    tryListen(preferredPort, allowFallback && preferredPort !== 0);
   });
 }
 
@@ -238,7 +241,19 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     }, 100);
   });
 
-  const { server, port } = await listen(app, host, opts.port ?? DEFAULT_PORT);
+  const preferredPort = opts.port ?? DEFAULT_PORT;
+  let server: Server;
+  let port: number;
+  try {
+    ({ server, port } = await listen(app, host, preferredPort, tunnel.managed));
+  } catch (error) {
+    if (!tunnel.managed && (error as NodeJS.ErrnoException).code === "EADDRINUSE") {
+      throw new Error(
+        `External endpoint requires stable relay target 127.0.0.1:${preferredPort}, but that port is unavailable; no ephemeral fallback was used. Free the port and retry.`
+      );
+    }
+    throw error;
+  }
   const startedAt = new Date().toISOString();
   logger.info(`Bridge listening on ${host}:${port} for workspace ${workspace.name} (${workspace.id})`);
 

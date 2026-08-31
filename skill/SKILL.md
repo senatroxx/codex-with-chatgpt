@@ -227,7 +227,8 @@ Speak only of 临时地址 / 固定域名 / 登录 Cloudflare.
    to `[sandbox_workspace_write].writable_roots` so later chats can write logs
    without elevation. If the write is denied, request approval and retry once.
    → returns `{ mcpUrl, pairingCode, workspaceName, connectorName, endpoint, ... }`.
-   For an external endpoint, `endpoint.managed` is false and the URL is stable;
+   For an external endpoint, `endpoint.managed` is false, the URL is stable,
+   and `endpoint.relayTarget` identifies the local relay target;
    do not install or start cloudflared. The external reverse proxy and
    host-local relay must already be configured outside C2C.
    `connectorName` is this workspace's plugin title (legacy installs stay
@@ -607,7 +608,7 @@ and external endpoints keep their URL across bridge restarts.
 | ChatGPT says tool call failed / 401 | token expired or revoked → re-pair (new pairing code + authorize) |
 | Pairing code rejected/expired | `c2c pair --json` for a fresh code |
 | Same explicit ChatGPT setup/reconnect browser configuration step fails twice after repair | Stop automating ChatGPT settings and use **Guided manual ChatGPT setup fallback**. Do not count browser/js timeout, loading/generating, or login/2FA waiting as failures. |
-| Port conflict | handled automatically; never surface to the user |
+| Port conflict | Managed Cloudflare modes may recover with an ephemeral port. External mode requires its stable `endpoint.relayTarget`; surface the clear startup error and ask the user to free that port. |
 | Every new chat “repairs” / cannot write the log or settings directory | `c2c sandbox-allow --json` (once). Do not ask the user. |
 | cloudflared missing (managed Cloudflare mode) | install it yourself (brew/winget), then retry; external mode must not install it |
 | Sidebar has no「项目」 | Ask the user to hover「聊天」, click the …, choose「按项目整理」 |

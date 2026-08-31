@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createServer, type AddressInfo } from "node:net";
 import path from "node:path";
 import { startBridge } from "../src/bridge/server.js";
 import { Workspace } from "../src/workspace/manager.js";
@@ -32,8 +33,16 @@ describe("external endpoint URL", () => {
     expect(() => normalizeExternalEndpointUrl("https://example.com/c2c")).toThrow(/origin/);
     expect(() => normalizeExternalEndpointUrl("https://user:pass@example.com")).toThrow(/origin/);
     expect(() => normalizeExternalEndpointUrl("https://example.com/?token=secret")).toThrow(/origin/);
+    expect(() => normalizeExternalEndpointUrl("https://example.com?")).toThrow(/origin/);
+    expect(() => normalizeExternalEndpointUrl("https://example.com/#")).toThrow(/origin/);
     expect(() => normalizeExternalEndpointUrl("https://localhost")).toThrow(/origin/);
+    expect(() => normalizeExternalEndpointUrl("https://10.100.0.2")).toThrow(/origin/);
+    expect(() => normalizeExternalEndpointUrl("https://192.168.1.10")).toThrow(/origin/);
+    expect(() => normalizeExternalEndpointUrl("https://172.16.0.1")).toThrow(/origin/);
+    expect(() => normalizeExternalEndpointUrl("https://169.254.1.1")).toThrow(/origin/);
     expect(() => normalizeExternalEndpointUrl("https://[::1]")).toThrow(/origin/);
+    expect(() => normalizeExternalEndpointUrl("https://[fd00::2]")).toThrow(/origin/);
+    expect(() => normalizeExternalEndpointUrl("https://[fe80::2]")).toThrow(/origin/);
   });
 });
 
@@ -180,6 +189,36 @@ describe("external bridge integration and provider switches", () => {
       expect(mcpResponse.status).toBe(401);
     } finally {
       await bridge.close();
+    }
+  });
+
+  it("fails instead of moving to an ephemeral port when the relay target is occupied", async () => {
+    stateDirs.push(isolateStateDir());
+    const root = makeTmpDir("external-port");
+    tempDirs.push(root);
+    write(root, "hello.txt", "hello\n");
+    const workspace = new Workspace(root);
+    chooseExternalEndpoint(workspace.id, "https://c2c.example.com");
+    const blocker = createServer();
+    await new Promise<void>((resolve, reject) => {
+      blocker.once("error", reject);
+      blocker.listen(0, "127.0.0.1", () => resolve());
+    });
+    const port = (blocker.address() as AddressInfo).port;
+    const authDir = makeTmpDir("auth-external-port");
+    tempDirs.push(authDir);
+
+    try {
+      await expect(
+        startBridge({
+          workspaceRoot: root,
+          port,
+          persistRuntime: false,
+          authStoreFile: path.join(authDir, "store.json"),
+        })
+      ).rejects.toThrow(new RegExp(`stable relay target 127\\.0\\.0\\.1:${port}.*no ephemeral fallback`));
+    } finally {
+      await new Promise<void>((resolve) => blocker.close(() => resolve()));
     }
   });
 

@@ -85,6 +85,7 @@ c2c endpoint configure -w /path/to/workspace --url https://c2c.example.com
 ```
 
 C2C 不会管理 VPS、反向代理、WireGuard、DNS 或 TLS。Bridge 仍然只监听本机回环地址；请在家中开发服务器上自行维护一个只绑定私有/WireGuard 地址的中继，把流量转发到 `127.0.0.1:<c2c-port>`。V1 只支持 HTTPS origin，不支持 `/c2c` 这类路径前缀。Bridge 重启不会改变连接器地址。公网地址无法从本机验证时，`c2c doctor` 只给出警告，不会切换到 Cloudflare，也不会自动替换连接器。
+外部模式默认使用固定的本机中继目标 `127.0.0.1:48765`；如果端口被占用，启动会明确失败，不会悄悄改用临时端口。
 
 凭证放在系统目录，不进项目。
 

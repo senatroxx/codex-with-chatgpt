@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import type { Logger } from "../logger/index.js";
 import { nullLogger } from "../logger/index.js";
 import { SERVICE_NAME } from "../version.js";
@@ -10,11 +11,39 @@ export interface ExternalEndpointOptions {
   logger?: Logger;
 }
 
+function isPrivateOrLocalLiteral(hostname: string): boolean {
+  const value = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  const version = isIP(value);
+  if (version === 4) {
+    const octets = value.split(".").map(Number);
+    const [first, second] = octets;
+    return (
+      first === 0 ||
+      first === 10 ||
+      first === 127 ||
+      (first === 169 && second === 254) ||
+      (first === 172 && second >= 16 && second <= 31) ||
+      (first === 192 && second === 168)
+    );
+  }
+  if (version === 6) {
+    return (
+      value === "::" ||
+      value === "::1" ||
+      /^(?:fc|fd)/.test(value) ||
+      /^fe[89ab]/.test(value) ||
+      (value.startsWith("::ffff:") && isPrivateOrLocalLiteral(value.slice(7)))
+    );
+  }
+  return false;
+}
+
 /** Normalize the v1 external endpoint format: an HTTPS origin only. */
 export function normalizeExternalEndpointUrl(input: string): string {
+  const trimmed = input.trim();
   let parsed: URL;
   try {
-    parsed = new URL(input.trim());
+    parsed = new URL(trimmed);
   } catch {
     throw new Error(`Invalid external endpoint URL: ${input}`);
   }
@@ -28,10 +57,11 @@ export function normalizeExternalEndpointUrl(input: string): string {
     parsed.pathname !== "/" ||
     parsed.search ||
     parsed.hash ||
+    trimmed.includes("?") ||
+    trimmed.includes("#") ||
     hostname === "localhost" ||
     hostname.endsWith(".localhost") ||
-    hostname === "127.0.0.1" ||
-    hostnameWithoutBrackets === "::1"
+    isPrivateOrLocalLiteral(hostnameWithoutBrackets)
   ) {
     throw new Error("External endpoint must be an HTTPS public origin, such as https://c2c.example.com");
   }

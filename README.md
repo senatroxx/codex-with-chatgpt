@@ -159,6 +159,8 @@ URL must be an HTTPS origin; path prefixes are not supported. The connector URL
 stays stable across bridge restarts. `c2c doctor` reports an endpoint that
 cannot be verified from the home server as a warning and does not switch to
 Cloudflare or replace the connector automatically.
+External mode uses the preferred local relay target `127.0.0.1:48765`; if that
+port is occupied, startup fails instead of silently choosing another port.
 
 Credentials stay in the OS app state directory, not in the project.
 
@@ -242,7 +244,7 @@ Docs: [architecture](docs/architecture.md) · [protocol](docs/protocol.md) ·
 
 ```
 src/
-  bridge/     loopback HTTP server, port recovery, admin API
+  bridge/     loopback HTTP server, managed-mode port recovery, admin API
   mcp/        8 read-only tools, stateless Streamable HTTP
   auth/       OAuth 2.1 (PKCE, DCR, refresh rotation, revocation)
   pairing/    one-time pairing codes (CSPRNG, TTL, rate limits)

@@ -7,6 +7,8 @@ import { findLiveBridge, readRuntimeState, type RuntimeState } from "../bridge/r
 import { Workspace } from "../workspace/manager.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const STOP_TIMEOUT_MS = 5_000;
+const STOP_POLL_MS = 50;
 
 /** Path to the CLI entry, works from dist/ and from tsx dev runs. */
 function cliEntry(): { cmd: string; args: string[] } {
@@ -98,18 +100,40 @@ export async function stopBridge(workspaceRoot: string): Promise<boolean> {
   const runtime = readRuntimeState(workspace.id);
   if (!runtime) return false;
   const live = await findLiveBridge(workspace.id);
+  let stopRequested = false;
   if (live) {
     try {
       await adminFetch(live, "POST", "/admin/shutdown", 5000);
-      return true;
+      stopRequested = true;
     } catch {
       // fall through to kill
     }
   }
+  if (!stopRequested) {
+    try {
+      process.kill(runtime.pid, "SIGTERM");
+      stopRequested = true;
+    } catch {
+      if (processIsAlive(runtime.pid)) {
+        throw new Error(`Unable to stop bridge process ${runtime.pid}`);
+      }
+    }
+  }
+  if (!stopRequested) return false;
+  const deadline = Date.now() + STOP_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (!processIsAlive(runtime.pid)) return true;
+    await new Promise((resolve) => setTimeout(resolve, STOP_POLL_MS));
+  }
+  if (!processIsAlive(runtime.pid)) return true;
+  throw new Error(`Bridge process ${runtime.pid} did not terminate within ${STOP_TIMEOUT_MS / 1000}s; replacement not started`);
+}
+
+function processIsAlive(pid: number): boolean {
   try {
-    process.kill(runtime.pid, "SIGTERM");
+    process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
   }
 }

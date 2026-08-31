@@ -19,6 +19,7 @@ import {
 } from "../tunnel/named-provision.js";
 import { parseZoneInput, suggestedNamedHostname } from "../tunnel/hostname.js";
 import {
+  clearPendingConnectorRepair,
   chooseExternalEndpoint,
   duplicateExternalEndpointIds,
   externalEndpointBinding,
@@ -26,11 +27,12 @@ import {
   NAMED_LOGIN_PROMPT,
   NAMED_REPAIR_MESSAGE,
   needsTunnelChoice,
+  pendingConnectorRepair,
   readTunnelState,
   TUNNEL_CHOICE_PROMPT,
 } from "../tunnel/state.js";
 import { Logger } from "../logger/index.js";
-import { getStateDir } from "../config/paths.js";
+import { DEFAULT_PORT, getStateDir } from "../config/paths.js";
 import { ensureSandboxAllowlist, getCodexConfigPath, isStateDirAllowlisted } from "../config/sandbox-allow.js";
 import {
   CHATGPT_CREATE_CONNECTOR_URL,
@@ -65,6 +67,10 @@ const cross = (msg: string): void => say(`✗ ${msg}`);
 
 function resolveWorkspace(option?: string): string {
   return path.resolve(option ?? process.cwd());
+}
+
+function relayTarget(port: number): string {
+  return `127.0.0.1:${port}`;
 }
 
 function persistWorkspaceEndpoint(opts: {
@@ -221,8 +227,10 @@ program
             port: runtime.port,
             publicUrl: info.publicUrl,
             mcpUrl,
-          })
+        })
         : readLastEndpoint(info.workspaceId)?.connectorName;
+      const endpointState = readTunnelState(info.workspaceId);
+      const pending = pendingConnectorRepair(endpointState);
       if (opts.json) {
         say(
           JSON.stringify({
@@ -239,6 +247,8 @@ program
                 : "external",
               managed: info.tunnel.managed,
               url: info.publicUrl,
+              relayTarget: info.tunnel.managed ? null : relayTarget(runtime.port),
+              connectorAction: pending?.action ?? "none",
             },
           })
         );
@@ -304,6 +314,8 @@ program
               mode: external ? "external" : isNamedTunnelReady(tunnelState) ? "named" : "quick",
               managed: tunnelState.preference !== "external",
               url: info.publicUrl,
+              relayTarget: external ? relayTarget(runtime.port) : null,
+              connectorAction: pendingConnectorRepair(tunnelState)?.action ?? "none",
             },
             tunnel: {
               mode: external
@@ -354,7 +366,6 @@ program
   .action(async (opts: { workspace?: string; tunnel: boolean }) => {
     const root = resolveWorkspace(opts.workspace);
     await stopBridge(root);
-    await new Promise((resolve) => setTimeout(resolve, 500));
     try {
       const { info, mcpUrl } = await ensureBridgeAndTunnel(root, { tunnel: opts.tunnel });
       check(`Bridge 已重启（${info.workspaceName}）`);
@@ -378,10 +389,13 @@ program
     if (!runtime) {
       const state = readTunnelState(workspace.id);
       const external = externalEndpointBinding(state);
+      const pending = pendingConnectorRepair(state);
       const endpoint = {
         mode: external ? "external" : state.preference,
         managed: state.preference !== "external",
         url: external?.url ?? null,
+        relayTarget: state.preference === "external" ? relayTarget(DEFAULT_PORT) : null,
+        connectorAction: pending?.action ?? "none",
       };
       if (opts.json) say(JSON.stringify({ ok: false, running: false, endpoint }));
       else {
@@ -392,7 +406,23 @@ program
     }
     const info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
     if (opts.json) {
-      say(JSON.stringify({ ok: true, running: true, ...info }));
+      const state = readTunnelState(workspace.id);
+      const external = externalEndpointBinding(state);
+      const pending = pendingConnectorRepair(state);
+      say(
+        JSON.stringify({
+          ok: true,
+          running: true,
+          ...info,
+          endpoint: {
+            mode: external ? "external" : info.tunnel.provider === "cloudflare-named" ? "named" : "quick",
+            managed: info.tunnel.managed,
+            url: info.publicUrl,
+            relayTarget: info.tunnel.managed ? null : relayTarget(info.port),
+            connectorAction: pending?.action ?? "none",
+          },
+        })
+      );
       return;
     }
     say(PRODUCT_NAME);
@@ -405,6 +435,7 @@ program
           ? `安全连接：${info.tunnel.url}/mcp`
           : `外部入口（C2C 不管理）：${info.tunnel.url}/mcp`
       );
+      if (!info.tunnel.managed) say(`· 中继目标：${relayTarget(info.port)}`);
     }
     else say("· 安全连接：未启用（本地模式）");
     say(`· 已授权连接：${info.tokenCount > 0 ? "是" : "否"}`);
@@ -500,22 +531,42 @@ program
         })
       : "Codex with ChatGPT";
     const tunnelState = workspace ? readTunnelState(workspace.id) : null;
-    const external = tunnelState ? externalEndpointBinding(tunnelState) : null;
     const externalConfigured = tunnelState?.preference === "external";
+    let external = tunnelState ? externalEndpointBinding(tunnelState) : null;
+    let externalConfigError: string | null = null;
+    if (externalConfigured) {
+      try {
+        const rawUrl = tunnelState?.externalUrl?.trim();
+        const endpointId = tunnelState?.endpointId?.trim();
+        if (!rawUrl || !endpointId) throw new Error("External endpoint configuration is incomplete or invalid");
+        external = { url: normalizeExternalEndpointUrl(rawUrl), endpointId };
+      } catch (error) {
+        externalConfigError = (error as Error).message;
+        external = null;
+      }
+    }
+    const pending = tunnelState ? pendingConnectorRepair(tunnelState) : null;
     let externalEndpoint: {
       configured: boolean;
       managed: false;
       url: string | null;
       reachability: "reachable" | "unreachable" | "unverified" | "wrong_instance";
+      relayTarget: string | null;
+      connectorAction: "create" | "update" | null;
     } | null = externalConfigured
       ? {
-          configured: Boolean(external),
+          configured: Boolean(external && !externalConfigError),
           managed: false,
           url: external?.url ?? null,
           reachability: "unverified",
+          relayTarget: relayTarget(runtime?.port ?? DEFAULT_PORT),
+          connectorAction: pending?.action ?? null,
         }
       : null;
     let externalRepair: { needed: boolean; userMessage?: string } = { needed: false };
+    if (externalConfigured) {
+      report.externalRelayTarget = { ok: true, detail: relayTarget(runtime?.port ?? DEFAULT_PORT) };
+    }
     const namedReady = tunnelState ? isNamedTunnelReady(tunnelState) : false;
     let namedRepair: { needed: boolean; userMessage?: string } = { needed: false };
     let chatgptRepair: {
@@ -547,8 +598,8 @@ program
     };
 
     if (externalConfigured) {
-      if (!external) {
-        report.endpoint = { ok: false, detail: "INVALID_EXTERNAL_ENDPOINT" };
+      if (!external || externalConfigError) {
+        report.endpoint = { ok: false, detail: externalConfigError ?? "INVALID_EXTERNAL_ENDPOINT" };
       } else {
         report.endpoint = { ok: true, detail: external.url };
         if (runtime) {
@@ -556,7 +607,6 @@ program
           if (info.tunnel.provider !== "external") {
             if (opts.fix) {
               await stopBridge(root);
-              await new Promise((resolve) => setTimeout(resolve, 400));
               try {
                 runtime = (await ensureBridge(root)).runtime;
                 info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
@@ -572,7 +622,15 @@ program
           if (report.endpoint.ok && info.tunnel.provider === "external") {
             const check = await new ExternalEndpointProvider(external).doctor();
             const reachability = check.reachability ?? "unverified";
-            externalEndpoint = { configured: true, managed: false, url: external.url, reachability };
+            externalEndpoint = {
+              configured: true,
+              managed: false,
+              url: external.url,
+              reachability,
+              relayTarget: relayTarget(info.port),
+              connectorAction: pending?.action ?? null,
+            };
+            report.externalRelayTarget = { ok: true, detail: relayTarget(info.port) };
             if (reachability === "wrong_instance") {
               report.externalReachability = { ok: false, detail: check.problems[0] ?? "外部入口指向错误实例" };
               externalRepair = { needed: true, userMessage: "外部入口没有指向当前 C2C，请检查反向代理和本机中继配置。" };
@@ -586,9 +644,10 @@ program
               };
             }
 
-            if (reachability !== "wrong_instance") {
+            if (reachability === "reachable") {
               const nextMcp = mcpUrlFromPublic(external.url);
-              const action = connectorAction(lastEndpoint?.mcpUrl, nextMcp);
+              const action = pending?.action ?? connectorAction(lastEndpoint?.mcpUrl, nextMcp);
+              const previousMcpUrl = pending?.previousMcpUrl ?? lastEndpoint?.mcpUrl ?? null;
               const boundName = nextMcp
                 ? persistWorkspaceEndpoint({
                     workspaceId: info.workspaceId,
@@ -607,13 +666,14 @@ program
                 connectorName: boundName,
                 userMessage: action === "update" ? reclaimUserMessage(boundName) : undefined,
                 mcpUrl: nextMcp,
-                previousMcpUrl: lastEndpoint?.mcpUrl ?? null,
+                previousMcpUrl,
               };
               if (action === "update") {
                 try {
                   const pairing = await adminFetch<PairingResponse>(runtime, "POST", "/admin/pairing");
                   chatgptRepair.pairingCode = pairing.code;
                   chatgptRepair.pairingExpiresAt = pairing.expiresAt;
+                  if (pending?.action === "update") clearPendingConnectorRepair(info.workspaceId);
                   results.push(`已生成新的配对码，需要更新「${boundName}」`);
                 } catch (error) {
                   report.oauth = { ok: false, detail: (error as Error).message };
@@ -629,7 +689,6 @@ program
       let info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
       if (namedReady && opts.fix && info.tunnel.provider !== "cloudflare-named") {
         await stopBridge(root);
-        await new Promise((resolve) => setTimeout(resolve, 400));
         try {
           runtime = (await ensureBridge(root)).runtime;
           info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
@@ -755,6 +814,7 @@ program
       oauth: "OAuth",
       tunnel: "Tunnel",
       endpoint: "Endpoint",
+      externalRelayTarget: "External relay target",
       externalReachability: "External reachability",
     };
     let allOk = true;
@@ -1107,13 +1167,27 @@ endpointCmd
       const workspace = new Workspace(resolveWorkspace(opts.workspace));
       const state = readTunnelState(workspace.id);
       const external = externalEndpointBinding(state);
+      const pending = pendingConnectorRepair(state);
+      let error: string | null = null;
+      if (state.preference === "external" && !external) {
+        try {
+          const rawUrl = state.externalUrl?.trim();
+          if (!rawUrl || !state.endpointId?.trim()) throw new Error("External endpoint configuration is incomplete or invalid");
+          normalizeExternalEndpointUrl(rawUrl);
+        } catch (cause) {
+          error = (cause as Error).message;
+        }
+      }
       const payload = {
-        ok: true,
+        ok: !error,
         mode: external ? "external" : state.preference,
         managed: state.preference !== "external",
         url: external?.url ?? null,
         endpointId: external?.endpointId ?? null,
+        relayTarget: state.preference === "external" ? relayTarget(DEFAULT_PORT) : null,
+        connectorAction: pending?.action ?? "none",
         configured: Boolean(external),
+        error,
       };
       if (opts.json) say(JSON.stringify(payload));
       else if (external) check(`外部入口（C2C 不管理）：${external.url}`);
@@ -1136,10 +1210,16 @@ endpointCmd
       const url = normalizeExternalEndpointUrl(opts.url);
       const previous = readTunnelState(workspace.id);
       const previousExternal = externalEndpointBinding(previous);
+      const previousEndpoint = readLastEndpoint(workspace.id);
+      const nextMcpUrl = mcpUrlFromPublic(url);
+      const action = connectorAction(previousEndpoint?.mcpUrl, nextMcpUrl);
       const state = chooseExternalEndpoint(
         workspace.id,
         url,
-        previousExternal?.url === url ? previousExternal.endpointId : undefined
+        previousExternal?.url === url ? previousExternal.endpointId : undefined,
+        action === "none"
+          ? undefined
+          : { action, previousMcpUrl: previousEndpoint?.mcpUrl ?? null }
       );
       const duplicateIds = duplicateExternalEndpointIds(workspace.id, url);
       if (await findLiveBridge(workspace.id)) await stopBridge(root);
@@ -1148,7 +1228,9 @@ endpointCmd
         mode: "external",
         managed: false,
         url,
-        mcpUrl: `${url}/mcp`,
+        mcpUrl: nextMcpUrl,
+        connectorAction: action,
+        pendingConnectorAction: state.pendingConnectorAction ?? null,
         duplicateWarning: duplicateIds.length > 0,
         duplicateWorkspaceIds: duplicateIds,
         state,
@@ -1156,6 +1238,7 @@ endpointCmd
       if (opts.json) say(JSON.stringify(payload));
       else {
         check(`已配置外部入口：${url}`);
+        if (action === "update") say("需要更新当前工作区的 ChatGPT 连接器。");
         if (duplicateIds.length > 0) say("警告：另一个工作区也配置了相同地址，请确认反向代理只指向当前工作区。");
       }
     } catch (error) {
