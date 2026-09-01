@@ -32,26 +32,41 @@ function isPrivateOrLocalIpv4(value: string): boolean {
   );
 }
 
-function mappedIpv4(value: string): string | null {
+function parseIpv6Groups(value: string): number[] | null {
   const halves = value.split("::");
   if (halves.length > 2) return null;
-  const left = halves[0] ? halves[0].split(":") : [];
-  let right = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
-  const dotted = right.at(-1);
-  if (dotted?.includes(".")) {
-    right = right.slice(0, -1);
-    const octets = dotted.split(".").map(Number);
-    if (octets.length !== 4 || octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) return null;
-    right.push(((octets[0] << 8) | octets[1]).toString(16), ((octets[2] << 8) | octets[3]).toString(16));
-  }
-  const groups = [...left, ...(halves.length === 2 ? Array(8 - left.length - right.length).fill("0") : []), ...right];
-  if (groups.length !== 8 || groups.slice(0, 5).some((group) => parseInt(group, 16) !== 0) || parseInt(groups[5], 16) !== 0xffff) {
-    return null;
-  }
-  const high = parseInt(groups[6], 16);
-  const low = parseInt(groups[7], 16);
-  if (!Number.isInteger(high) || !Number.isInteger(low)) return null;
+  const parseHalf = (part: string): number[] | null => {
+    if (!part) return [];
+    const groups = part.split(":");
+    const dotted = groups.at(-1);
+    if (dotted?.includes(".")) {
+      groups.pop();
+      const octets = dotted.split(".").map(Number);
+      if (octets.length !== 4 || octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) return null;
+      groups.push(((octets[0] << 8) | octets[1]).toString(16), ((octets[2] << 8) | octets[3]).toString(16));
+    }
+    const parsed = groups.map((group) => (/^[0-9a-f]{1,4}$/i.test(group) ? parseInt(group, 16) : -1));
+    return parsed.some((group) => group < 0) ? null : parsed;
+  };
+  const left = parseHalf(halves[0]);
+  const right = halves.length === 2 ? parseHalf(halves[1]) : [];
+  if (!left || !right) return null;
+  const missing = 8 - left.length - right.length;
+  if (halves.length === 2 ? missing < 1 : missing !== 0) return null;
+  return [...left, ...(halves.length === 2 ? Array(missing).fill(0) : []), ...right];
+}
+
+function mappedIpv4(value: string): string | null {
+  const groups = parseIpv6Groups(value);
+  if (!groups || groups.slice(0, 5).some((group) => group !== 0) || groups[5] !== 0xffff) return null;
+  const high = groups[6];
+  const low = groups[7];
   return `${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`;
+}
+
+function isIpv6Prefix(value: string, prefix: readonly number[]): boolean {
+  const groups = parseIpv6Groups(value);
+  return groups !== null && prefix.every((group, index) => groups[index] === group);
 }
 
 function isPrivateOrLocalLiteral(hostname: string): boolean {
@@ -59,13 +74,14 @@ function isPrivateOrLocalLiteral(hostname: string): boolean {
   const version = isIP(value);
   if (version === 4) return isPrivateOrLocalIpv4(value);
   if (version === 6) {
+    const groups = parseIpv6Groups(value);
     const mapped = mappedIpv4(value);
     return (
       value === "::" ||
       value === "::1" ||
       /^(?:fc|fd)/.test(value) ||
-      /^fe[89ab]/.test(value) ||
-      /^fe[c-f]/.test(value) ||
+      (groups !== null && groups[0] >= 0xfe80 && groups[0] <= 0xfeff) ||
+      isIpv6Prefix(value, [0x64, 0xff9b, 0x1]) ||
       /^ff/.test(value) ||
       /^2001:db8(?::|$)/.test(value) ||
       (mapped !== null && isPrivateOrLocalIpv4(mapped))
@@ -144,24 +160,36 @@ function resolvePublicExternalAddresses(hostname: string, timeoutMs: number): Pr
   return new Promise((resolve, reject) => {
     let settled = false;
     let pending = 2;
-    let lastError: NodeJS.ErrnoException | null = null;
+    let lastError: Error | null = null;
     const addresses: LookupAddress[] = [];
-    const timer = setTimeout(() => {
-      settled = true;
-      resolver.cancel();
-      reject(new Error(`External endpoint probe timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-    const finish = (error: NodeJS.ErrnoException | null, values: string[], family: 4 | 6): void => {
+    const familyTimers = new Map<4 | 6, ReturnType<typeof setTimeout>>();
+    let overallTimer: ReturnType<typeof setTimeout>;
+    const finish = (error: Error | null, values: string[], family: 4 | 6): void => {
       if (settled) return;
+      const familyTimer = familyTimers.get(family);
+      if (familyTimer) clearTimeout(familyTimer);
       if (error) lastError = error;
       else addresses.push(...values.map((address) => ({ address, family })));
       pending -= 1;
       if (pending > 0) return;
       settled = true;
-      clearTimeout(timer);
+      resolver.cancel();
+      clearTimeout(overallTimer);
+      for (const timer of familyTimers.values()) clearTimeout(timer);
       if (addresses.length > 0) resolve(addresses);
       else reject(lastError ?? new Error("External endpoint DNS lookup returned no addresses"));
     };
+    const familyTimeoutMs = Math.max(1, Math.min(2_000, Math.floor(timeoutMs / 3)));
+    overallTimer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolver.cancel();
+      for (const timer of familyTimers.values()) clearTimeout(timer);
+      if (addresses.length > 0) resolve(addresses);
+      else reject(new Error(`External endpoint probe timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    familyTimers.set(4, setTimeout(() => finish(new Error("IPv4 DNS lookup timed out"), [], 4), familyTimeoutMs));
+    familyTimers.set(6, setTimeout(() => finish(new Error("IPv6 DNS lookup timed out"), [], 6), familyTimeoutMs));
     resolver.resolve4(hostname, (error, values) => finish(error, values ?? [], 4));
     resolver.resolve6(hostname, (error, values) => finish(error, values ?? [], 6));
   });
