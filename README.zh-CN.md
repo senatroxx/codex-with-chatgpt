@@ -8,7 +8,8 @@
 
 ChatGPT 付费订阅的网页版额度大量闲置，Codex 却在消耗紧张的 API 额度做
 规划和 Review。本项目把"思考"交给你已付费的网页版 ChatGPT，Codex 只负责
-执行。不用 API Key、不搞逆向代理——官方网页 + 只读 MCP 桥接。
+执行。不用 API Key，默认也不用自己搭建入口——官方网页 + 只读 MCP 桥接；
+已有固定入口时也可以直接接入。
 
 ## 这是什么
 
@@ -26,7 +27,8 @@ Agent（Codex），然后去倒杯咖啡：
 所有事情你自己做：
 
 1. 环境自检：需要 git 和 Node.js ≥ 20，缺什么就自动安装
-  （macOS 用 Homebrew，Windows 用 winget），同时安装 cloudflared。
+  （macOS 用 Homebrew，Windows 用 winget）。如果不用自己的固定 HTTPS 地址，
+  再安装 cloudflared。
 2. 下载：把 https://github.com/XiaoDuoYa/codex-with-chatgpt 克隆到
    ~/codex-with-chatgpt（已存在就 git pull 更新）。
 3. 构建：在该目录里执行 corepack pnpm install 和 corepack pnpm build。
@@ -66,13 +68,25 @@ Codex with ChatGPT
 Ready.
 ```
 
-唯一可能需要你动手的步骤：登录 ChatGPT（如果要用固定域名，再登录一次 Cloudflare）。**新仓库**还会请你在 ChatGPT 里建一次项目（合集）：名字用仓库名，记忆选「仅限项目记忆」。侧栏如果没有「项目」，把鼠标放在「聊天」上，点右边三个点，选「按项目整理」。之后对话都从合集页开，不用回首页。已经在用的仓库默认还是原来的一条长对话，除非你说要改成 Project。
+唯一可能需要你动手的步骤：登录 ChatGPT（如果要用 Cloudflare 固定域名，再登录一次 Cloudflare）。如果你已有固定的 HTTPS 地址，可以运行 `c2c endpoint configure --url https://c2c.example.com`。**新仓库**还会请你在 ChatGPT 里建一次项目（合集）：名字用仓库名，记忆选「仅限项目记忆」。侧栏如果没有「项目」，把鼠标放在「聊天」上，点右边三个点，选「按项目整理」。之后对话都从合集页开，不用回首页。已经在用的仓库默认还是原来的一条长对话，除非你说要改成 Project。
 
 ### 可选的固定域名
 
 默认公网地址是临时的，桥重启后会变。Codex 会删掉这个项目的 ChatGPT 插件再按新地址加回去。
 
 如果你有 Cloudflare 账号，并且域名已经加在 Cloudflare 上，首次配置时（老用户则在下一次编码时问一次）会问你要不要用固定域名，例如 `c2c-<项目>.你的域名`。选是的话，浏览器里授权一次 Cloudflare 即可。之后重启一般不用再改插件。没有账号、不想用、登录失败：继续用临时地址，功能一样，只是修复更慢。
+
+### 使用自己的 HTTPS 地址
+
+如果你已经有 `https://c2c.example.com` 这样的公网 HTTPS 地址，可以运行：
+
+```bash
+c2c endpoint configure -w /path/to/workspace --url https://c2c.example.com
+```
+
+C2C 不会管理 VPS、反向代理、WireGuard、DNS 或 TLS。Bridge 仍然只监听本机回环地址；请在家中开发服务器上自行维护一个只绑定私有/WireGuard 地址的中继，把流量转发到 `127.0.0.1:<c2c-port>`。V1 只支持 HTTPS origin，不支持 `/c2c` 这类路径前缀。Bridge 重启不会改变连接器地址。公网地址无法从本机验证时，`c2c doctor` 只给出警告，不会切换到 Cloudflare，也不会自动替换连接器。
+外部模式默认使用固定的本机中继目标 `127.0.0.1:48765`；如果端口被占用，启动会明确失败，不会悄悄改用临时端口。
+ChatGPT 确认连接器已 Connected 后，Skill 会运行 `c2c endpoint acknowledge-repair` 确认修复完成。
 
 凭证放在系统目录，不进项目。
 
@@ -91,7 +105,8 @@ Ready.
              │      C2C Bridge     │   仅监听本机回环地址
              │  只读 MCP           │   OAuth 2.1 + 一次性配对码
              │  OAuth + 配对       │   Cloudflare Quick Tunnel
-             │  Tunnel 管理        │
+             │  Quick/Named 隧道   │
+             │  或外部入口         │
              └──────────┬──────────┘
                         │  只读
                         ▼
@@ -122,6 +137,8 @@ Ready.
   客户端注册、refresh token 轮换）。无令牌：401；令牌属于别的工作区：403。
 - **模型永远接触不到长期凭据**：唯一会出现在浏览器里的秘密是一次性配对码
   （5 分钟有效、限 5 次尝试、限速、用后即毁）。
+- **外部入口仍受约束**：C2C 继续只监听回环地址；`/health` 使用不暴露工作区路径的
+  不透明实例标识，中继必须留在私有网络内。
 
 完整威胁模型：[docs/security.md](docs/security.md)
 
@@ -130,15 +147,16 @@ Ready.
 ```bash
 pnpm install
 pnpm build          # 产出 dist/，暴露 c2c 命令
-pnpm test           # vitest：76 个测试（路径安全、OAuth、配对、MCP 端到端）
+pnpm test           # vitest（路径安全、OAuth、配对、MCP 端到端）
 
-c2c setup           # 一条命令：Bridge + 隧道 + 配对码
+c2c setup           # 一条命令：Bridge + 公共连接 + 配对码
+c2c endpoint configure --url https://c2c.example.com
 c2c sandbox-allow   # 把本地设置目录加入 Codex 沙箱白名单（macOS / Windows）
 c2c status / doctor / pair / unpair / logs / stop
 ```
 
-环境要求：Node.js >= 20、git；公网连接需要 `cloudflared`
-（自动检测，Skill 会替你安装）。
+环境要求：Node.js >= 20、git。只有使用 C2C 管理的 Cloudflare 连接时才需要
+`cloudflared`；外部入口由你自己的网络设施提供。
 
 文档：[架构](docs/architecture.md) · [协议](docs/protocol.md) ·
 [安全](docs/security.md) · [故障排查](docs/troubleshooting.md)
@@ -152,7 +170,7 @@ src/
   auth/       OAuth 2.1（PKCE、动态注册、refresh 轮换、吊销）
   pairing/    一次性配对码（CSPRNG、TTL、限速）
   workspace/  路径收敛、敏感文件策略、搜索、git
-  tunnel/     TunnelProvider 抽象 + Cloudflare Quick Tunnel
+  tunnel/     TunnelProvider + Cloudflare Quick/Named + 外部入口
   execution/  审查闭环所需的执行记录
   process/    守护进程生命周期
   cli/        c2c 命令行
@@ -163,7 +181,7 @@ docs/         架构 / 协议 / 安全 / 故障排查
 
 ## 状态与声明
 
-V1。已端到端验证：Bridge、OAuth + 配对、公网隧道、ChatGPT 连接器配置、
+V1。已端到端验证：Bridge、OAuth + 配对、公共连接、ChatGPT 连接器配置、
 零操作首次配置体验。
 
 **非官方社区项目，与 OpenAI 无关联，未获其背书。**

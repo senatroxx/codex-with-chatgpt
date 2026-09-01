@@ -7,6 +7,8 @@ import { suggestedNamedHostname } from "./hostname.js";
 import { normalizeNamedTunnelHostname } from "./cloudflared-named.js";
 import {
   NAMED_FALLBACK_MESSAGE,
+  pendingConnectorRepair,
+  readTunnelState,
   writeTunnelState,
   type TunnelState,
 } from "./state.js";
@@ -205,6 +207,7 @@ export async function provisionNamedTunnel(opts: {
     if (!account.hasCert()) await account.login();
     const tunnel = await account.createTunnel(tunnelName);
     await account.routeDns(tunnel.name, hostname);
+    const pending = pendingConnectorRepair(readTunnelState(opts.workspaceId));
     const state = writeTunnelState({
       workspaceId: opts.workspaceId,
       preference: "named",
@@ -215,6 +218,12 @@ export async function provisionNamedTunnel(opts: {
       hostname,
       zone: normalizeNamedTunnelHostname(opts.zone),
       configuredAt: new Date().toISOString(),
+      ...(pending
+        ? {
+            pendingConnectorAction: pending.action,
+            pendingPreviousMcpUrl: pending.previousMcpUrl,
+          }
+        : {}),
     });
     return { ok: true, state, fallback: false };
   } catch (error) {
@@ -223,12 +232,19 @@ export async function provisionNamedTunnel(opts: {
 }
 
 export function chooseQuickTunnel(workspaceId: string, fallbackReason?: string): TunnelState {
+  const pending = pendingConnectorRepair(readTunnelState(workspaceId));
   return writeTunnelState({
     workspaceId,
     preference: "quick",
     askedAt: new Date().toISOString(),
     provider: "cloudflare-quick",
     fallbackReason,
+    ...(pending
+      ? {
+          pendingConnectorAction: pending.action,
+          pendingPreviousMcpUrl: pending.previousMcpUrl,
+        }
+      : {}),
   });
 }
 

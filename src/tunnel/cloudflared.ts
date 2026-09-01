@@ -20,6 +20,7 @@ export function parseQuickTunnelUrl(line: string): string | null {
  */
 export class CloudflaredQuickTunnel implements TunnelProvider {
   readonly name = "cloudflare-quick";
+  readonly managed = true;
   private child: ChildProcess | null = null;
   private url: string | null = null;
   private lastError: string | null = null;
@@ -114,6 +115,7 @@ export class CloudflaredQuickTunnel implements TunnelProvider {
       running: this.child !== null && this.url !== null,
       url: this.url,
       provider: this.name,
+      managed: this.managed,
       detail: this.lastError ?? undefined,
     };
   }
@@ -130,6 +132,7 @@ export class CloudflaredQuickTunnel implements TunnelProvider {
     if (this.child && !this.url) problems.push("tunnel running but no public URL yet");
     return {
       provider: this.name,
+      managed: this.managed,
       binaryFound: bin !== null,
       binaryPath: bin,
       running: this.child !== null,

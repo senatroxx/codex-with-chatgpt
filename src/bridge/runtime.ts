@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { ensureDir, getStateDir, readJsonIfExists, writeSecureJson } from "../config/paths.js";
 import { SERVICE_NAME, VERSION } from "../version.js";
@@ -14,10 +15,69 @@ export interface RuntimeState {
   workspaceId: string;
   workspaceRoot: string;
   pid: number;
+  processStartIdentity?: string;
   port: number;
   adminToken: string;
+  instanceId?: string;
   publicUrl: string | null;
   startedAt: string;
+}
+
+/** Process start identity prevents stale PID reuse from being killed. */
+export function readProcessStartIdentity(pid: number): string | null {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    if (process.platform === "linux") {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+      const commandEnd = stat.lastIndexOf(")");
+      if (commandEnd < 0) return null;
+      return stat.slice(commandEnd + 2).trim().split(/\s+/)[19] ?? null;
+    }
+    if (process.platform === "darwin") {
+      return processInfoFromCommand(["ps", "-p", String(pid), "-o", "lstart="]);
+    }
+    if (process.platform === "win32") {
+      return processInfoFromCommand([
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`,
+      ]);
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Command line fallback for runtime files written before process identity support. */
+export function readProcessCommandLine(pid: number): string | null {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    if (process.platform === "linux") {
+      return fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").replaceAll("\0", " ").trim() || null;
+    }
+    if (process.platform === "darwin") return processInfoFromCommand(["ps", "-p", String(pid), "-o", "command="]);
+    if (process.platform === "win32") {
+      return processInfoFromCommand([
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `(Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}').CommandLine`,
+      ]);
+    }
+  } catch {
+    // best effort; callers must fail closed when no identity is available
+  }
+  return null;
+}
+
+function processInfoFromCommand(command: string[]): string | null {
+  const result = spawnSync(command[0], command.slice(1), { encoding: "utf8", timeout: 1_000, windowsHide: true });
+  if (result.status !== 0) return null;
+  return result.stdout.trim() || null;
 }
 
 export function runtimeFile(workspaceId: string): string {
@@ -43,8 +103,11 @@ export function clearRuntimeState(workspaceId: string): void {
 export interface HealthPayload {
   service: string;
   version: string;
-  workspaceId: string;
   status: string;
+  instanceId?: string;
+  endpointId?: string;
+  /** Present only for health responses from older bridge versions. */
+  workspaceId?: string;
 }
 
 /** Probe a port and check whether a healthy c2c bridge for the workspace answers. */
@@ -70,7 +133,8 @@ export async function findLiveBridge(workspaceId: string): Promise<RuntimeState 
   const state = readRuntimeState(workspaceId);
   if (!state) return null;
   const health = await probeBridge(state.port);
-  if (health && health.workspaceId === workspaceId) return state;
+  if (health && state.instanceId && health.instanceId === state.instanceId) return state;
+  if (health && !state.instanceId && health.workspaceId === workspaceId) return state;
   return null;
 }
 

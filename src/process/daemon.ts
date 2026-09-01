@@ -3,10 +3,18 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureDir, getStateDir } from "../config/paths.js";
-import { findLiveBridge, probeBridge, readRuntimeState, type RuntimeState } from "../bridge/runtime.js";
+import {
+  findLiveBridge,
+  readProcessCommandLine,
+  readProcessStartIdentity,
+  readRuntimeState,
+  type RuntimeState,
+} from "../bridge/runtime.js";
 import { Workspace } from "../workspace/manager.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const STOP_TIMEOUT_MS = 5_000;
+const STOP_POLL_MS = 50;
 
 /** Path to the CLI entry, works from dist/ and from tsx dev runs. */
 function cliEntry(): { cmd: string; args: string[] } {
@@ -97,19 +105,67 @@ export async function stopBridge(workspaceRoot: string): Promise<boolean> {
   const workspace = new Workspace(workspaceRoot);
   const runtime = readRuntimeState(workspace.id);
   if (!runtime) return false;
-  const healthy = await probeBridge(runtime.port);
-  if (healthy && healthy.workspaceId === workspace.id) {
+  const live = await findLiveBridge(workspace.id);
+  let stopRequested = false;
+  if (live) {
     try {
-      await adminFetch(runtime, "POST", "/admin/shutdown", 5000);
-      return true;
+      await adminFetch(live, "POST", "/admin/shutdown", 5000);
+      stopRequested = true;
     } catch {
       // fall through to kill
     }
   }
-  try {
-    process.kill(runtime.pid, "SIGTERM");
-    return true;
-  } catch {
-    return false;
+  if (!stopRequested) {
+    const ownsProcess =
+      runtime.processStartIdentity
+        ? readProcessStartIdentity(runtime.pid) === runtime.processStartIdentity
+        : processCommandMatchesRuntime(runtime);
+    if (!ownsProcess) {
+      if (!processIsAlive(runtime.pid)) return false;
+      throw new Error(
+        `Unable to verify bridge process ${runtime.pid} ownership; refusing to stop an unrelated process. Run c2c stop after confirming the old process.`
+      );
+    }
+    try {
+      process.kill(runtime.pid, "SIGTERM");
+      stopRequested = true;
+    } catch {
+      if (processIsAlive(runtime.pid)) {
+        throw new Error(`Unable to stop bridge process ${runtime.pid}`);
+      }
+    }
   }
+  if (!stopRequested) return false;
+  const deadline = Date.now() + STOP_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (!processIsAlive(runtime.pid)) return true;
+    if (runtime.processStartIdentity && readProcessStartIdentity(runtime.pid) !== runtime.processStartIdentity) return true;
+    await new Promise((resolve) => setTimeout(resolve, STOP_POLL_MS));
+  }
+  if (!processIsAlive(runtime.pid)) return true;
+  throw new Error(`Bridge process ${runtime.pid} did not terminate within ${STOP_TIMEOUT_MS / 1000}s; replacement not started`);
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+function processCommandMatchesRuntime(runtime: RuntimeState): boolean {
+  const commandLine = readProcessCommandLine(runtime.pid);
+  if (!commandLine || !/(?:^|\s)serve(?:\s|$)/.test(commandLine)) return false;
+  const cliEntries = [
+    path.resolve(__dirname, "..", "cli", "index.js"),
+    path.resolve(__dirname, "..", "cli", "index.ts"),
+    path.resolve(__dirname, "..", "..", "src", "cli", "index.ts"),
+  ];
+  if (!cliEntries.some((entry) => commandLine.includes(entry))) return false;
+  const escapedWorkspace = runtime.workspaceRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(
+    `(?:^|\\s)--workspace(?:=|\\s+)(?:"${escapedWorkspace}"|'${escapedWorkspace}'|${escapedWorkspace})(?=\\s|$)`
+  ).test(commandLine);
 }
